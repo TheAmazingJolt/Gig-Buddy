@@ -48,15 +48,18 @@ const fmtTime = (ts) => {
 
 async function loadBatches() {
   try {
-    const r = await window.storage.get(STORAGE_KEY);
-    if (r && r.value) return JSON.parse(r.value);
-  } catch (e) { /* not found */ }
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (e) { /* corrupt or unavailable */ }
   return [];
 }
 
 async function saveBatches(batches) {
   try {
-    await window.storage.set(STORAGE_KEY, JSON.stringify(batches));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(batches));
   } catch (e) {
     console.error('save failed', e);
   }
