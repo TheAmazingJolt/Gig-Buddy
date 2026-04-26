@@ -1044,6 +1044,10 @@ function BulkImportForm({ onSave, onCancel }) {
             <div className="space-y-3 mb-6">
               {candidates.map(c => {
                 const sources = (c.imageindices || []).map(i => shots[i - 1]).filter(Boolean);
+                const isPostTrip = c.fromindex === true
+                  || String(c.screentype || '').toLowerCase() === 'summary'
+                  || c.actualminutes != null
+                  || c.actualpay != null;
                 return (
                   <div
                     key={c._idx}
@@ -1090,17 +1094,19 @@ function BulkImportForm({ onSave, onCancel }) {
                     <div className="flex gap-2 mt-3">
                       {c._kept && (
                         <>
-                          <button
-                            onClick={() => toggleAccept(c._idx)}
-                            className="btn-ghost"
-                            style={{ flex: 1, padding: '8px', fontSize: 12 }}
-                          >
-                            Mark {c._accepted ? 'declined' : 'accepted'}
-                          </button>
+                          {!isPostTrip && (
+                            <button
+                              onClick={() => toggleAccept(c._idx)}
+                              className="btn-ghost"
+                              style={{ flex: 1, padding: '8px', fontSize: 12 }}
+                            >
+                              Mark {c._accepted ? 'declined' : 'accepted'}
+                            </button>
+                          )}
                           <button
                             onClick={() => discard(c._idx)}
                             className="btn-ghost"
-                            style={{ padding: '8px 14px', fontSize: 12, color: 'var(--red)', borderColor: 'var(--red-soft)' }}
+                            style={{ flex: isPostTrip ? 1 : undefined, padding: '8px 14px', fontSize: 12, color: 'var(--red)', borderColor: 'var(--red-soft)' }}
                           >
                             Discard
                           </button>
@@ -1696,15 +1702,17 @@ function LogForm({ onSave, onCancel, onBulk }) {
         </div>
 
         <div className="flex gap-3 mt-6 mb-8">
-          <button
-            className="btn-decline"
-            onClick={() => submit(false)}
-            disabled={!canSave}
-            style={{ opacity: canSave ? 1 : 0.4 }}
-          >
-            <X size={18} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 6 }} />
-            Declined
-          </button>
+          {!fromSummary && (
+            <button
+              className="btn-decline"
+              onClick={() => submit(false)}
+              disabled={!canSave}
+              style={{ opacity: canSave ? 1 : 0.4 }}
+            >
+              <X size={18} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 6 }} />
+              Declined
+            </button>
+          )}
           <button
             className="btn-accept"
             onClick={() => submit(true)}
