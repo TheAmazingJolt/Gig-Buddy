@@ -53,5 +53,11 @@ export async function extractMulti(images) {
   if (!res.ok || !json.ok) {
     throw new Error(json.error || `Extraction failed (HTTP ${res.status})`);
   }
-  return Array.isArray(json.batches) ? json.batches : [];
+  return {
+    batches: Array.isArray(json.batches) ? json.batches : [],
+    indexFound: !!json.indexFound,
+    expectedCount: Number(json.expectedCount) || 0,
+    summaryImageIndex: json.summaryImageIndex ?? null,
+    unmatchedImages: Array.isArray(json.unmatchedImages) ? json.unmatchedImages : []
+  };
 }

@@ -260,57 +260,78 @@ app.post('/extract-multi', async (req, res) => {
       tsLines.push(`Image ${i + 1}: ${ts}`);
     }
 
-    const multiPrompt = `You will see ${images.length} screenshot(s) from the Instacart Shopper app. They may represent ONE batch or SEVERAL batches. Your job is to GROUP images that belong to the same batch, then extract structured data per group.
+    const multiPrompt = `You will see ${images.length} screenshot(s) from the Instacart Shopper app. Your job is to identify each individual batch and extract structured data per batch.
 
-Each image has a "taken at" timestamp:
+CRITICAL FIRST STEP — find the DAILY SUMMARY screenshot:
+
+The daily summary is the single most reliable source. Identify it by these markers:
+  - A title showing day-of-week + date (e.g. "Sun, Apr 26") near the top
+  - A bold "Total" label with the day's total earnings (e.g. "$184.06")
+  - An "Active hours" line with a duration (e.g. "5 hr 47 min 34 sec")
+  - A "Batches" label with a count (e.g. "Batches" → "7")
+  - A list of individual batch entries below "Batches", each row showing: a start time (e.g. "11:23am"), a dollar total (e.g. "$19.61"), and an order count (e.g. "2 orders" or "1 order")
+
+If you find a daily summary:
+  1. Extract its index — list every batch entry with its start time, total $, and order count.
+  2. The number of batches you return MUST EQUAL the number of entries in the daily summary's batch list.
+  3. For EACH index entry, find the detail screenshots (offer / summary / item-detail) that match by total $ AND start time visible inside the screenshot.
+  4. The "pay" field for each batch MUST equal the total $ from the matching daily summary entry — that is the authoritative final amount. Do not pull pay from the detail screenshots when an index entry exists.
+  5. Set "fromIndex": true and "indexEntryTime": the matching index time on every batch.
+  6. If an index entry has NO matching detail screenshots, still return a batch object using only the index data (time, total, order count). Set imageIndices to [] and screenType to "unknown".
+  7. The daily summary screenshot itself is NOT a batch — do not include it in the batches array. Add its image index to "summaryImageIndex".
+
+If NO daily summary is present (indexFound: false):
+  Fall back to grouping by content + timestamps:
+    - Same store + similar items + similar pay + close timestamps = same batch
+    - Different store / mismatched items / distant timestamps = different batches
+    - When time and content disagree, content wins. Lean "same batch" if both are within reasonable bounds.
+
+Image timestamps (when each image was taken — note: timestamps are unreliable when the user takes all screenshots back-to-back at end of day):
 ${tsLines.join('\n')}
 
-Grouping rules — combine BOTH cues:
-- Time: images taken within ~15 minutes of each other are LIKELY the same batch. Images separated by hours are LIKELY different batches.
-- Content: the SAME batch will share the same store, the same items count, the same approximate pay, and screen progression makes sense (offer → items list → summary). DIFFERENT batches have distinct stores, mismatched item counts, or contradictory data (e.g. two different "Active hours" times).
-
-When time and content disagree, content wins for grouping decisions, but lean toward "same batch" if BOTH are within reasonable bounds.
-
-For each batch, extract using ALL the rules below.
+Per-batch field rules:
 
 ${EXTRACT_PROMPT.split('Return ONLY')[1].split('{')[0]}
 
-Each batch object has these fields PLUS an "imageIndices" field — a 1-indexed array listing which images belong to that batch.
+Each batch object has these fields PLUS:
+  - "imageIndices": 1-indexed array of source detail screenshots
+  - "fromIndex": true if matched to a daily summary entry, false otherwise
+  - "indexEntryTime": the matching index entry's time string, or null
 
-Return ONLY a valid JSON object with key "batches" — no markdown, no code fences, no prose. Example:
+Return ONLY a valid JSON object — no markdown, no code fences, no prose:
 
 {
+  "indexFound": true | false,
+  "expectedCount": number,           // batch count from daily summary, or 0
+  "summaryImageIndex": number | null,// 1-indexed image position of the daily summary screenshot
   "batches": [
     {
-      "screenType": "summary",
-      "type": "shop_only",
-      "pay": 19.61,
-      "tipAmount": 0,
-      "miles": 5.3,
-      "items": 49,
-      "units": 69,
-      "estMinutes": null,
-      "actualMinutes": 53,
-      "store": "Publix",
-      "stops": 1,
-      "orders": 2,
-      "notes": "Active hours 52 min 37 sec",
-      "imageIndices": [1, 2]
-    },
-    {
-      "screenType": "offer",
-      "type": "shop_deliver",
-      ...
-      "imageIndices": [3, 4]
+      "screenType": "offer" | "summary" | "item_detail" | "unknown",
+      "type": "shop_deliver" | "shop_only" | "delivery_only" | "mixed" | null,
+      "pay": number,
+      "tipAmount": number | null,
+      "miles": number | null,
+      "items": number | null,
+      "units": number | null,
+      "estMinutes": number | null,
+      "actualMinutes": number | null,
+      "store": string | null,
+      "stops": number,
+      "orders": number,
+      "notes": string | null,
+      "imageIndices": [number, ...],
+      "fromIndex": boolean,
+      "indexEntryTime": string | null
     }
-  ]
+  ],
+  "unmatchedImages": [number, ...]   // 1-indexed images that couldn't be matched to any index entry
 }`;
 
     content.push({ type: 'text', text: multiPrompt });
 
     const message = await anthropic.messages.create({
       model: MODEL,
-      max_tokens: 4096,
+      max_tokens: 8192,
       messages: [{ role: 'user', content }]
     });
 
@@ -330,7 +351,16 @@ Return ONLY a valid JSON object with key "batches" — no markdown, no code fenc
     }
 
     const batches = Array.isArray(parsed?.batches) ? parsed.batches : [];
-    res.json({ ok: true, batches, model: MODEL, imageCount: images.length });
+    res.json({
+      ok: true,
+      batches,
+      indexFound: !!parsed?.indexFound,
+      expectedCount: Number(parsed?.expectedCount) || 0,
+      summaryImageIndex: parsed?.summaryImageIndex ?? null,
+      unmatchedImages: Array.isArray(parsed?.unmatchedImages) ? parsed.unmatchedImages : [],
+      model: MODEL,
+      imageCount: images.length
+    });
   } catch (e) {
     console.error('Extract-multi error:', e);
     res.status(500).json({ error: e.message || 'extraction failed' });

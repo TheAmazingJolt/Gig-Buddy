@@ -761,6 +761,7 @@ function BulkImportForm({ onSave, onCancel }) {
   const [phase, setPhase] = useState('upload'); // 'upload' | 'extracting' | 'review'
   const [error, setError] = useState(null);
   const [candidates, setCandidates] = useState([]); // [{ ...batch, imageIndices, _accepted, _kept }]
+  const [meta, setMeta] = useState({ indexFound: false, expectedCount: 0, summaryImageIndex: null, unmatchedImages: [] });
 
   const TYPE_LABELS = {
     shop_deliver: 'Shop & deliver',
@@ -802,12 +803,12 @@ function BulkImportForm({ onSave, onCancel }) {
     setError(null);
     setPhase('extracting');
     try {
-      const batches = await extractMulti(shots.map(s => ({
+      const result = await extractMulti(shots.map(s => ({
         data: s.base64,
         mediaType: s.mediaType,
         takenAt: s.takenAt
       })));
-      const lowered = batches.map(b => {
+      const lowered = result.batches.map(b => {
         const out = {};
         for (const k of Object.keys(b || {})) out[k.toLowerCase()] = b[k];
         return out;
@@ -819,6 +820,12 @@ function BulkImportForm({ onSave, onCancel }) {
         _idx: i
       }));
       setCandidates(prepared);
+      setMeta({
+        indexFound: result.indexFound,
+        expectedCount: result.expectedCount,
+        summaryImageIndex: result.summaryImageIndex,
+        unmatchedImages: result.unmatchedImages
+      });
       setPhase('review');
     } catch (err) {
       setError(err.message || 'Extraction failed');
@@ -908,6 +915,21 @@ function BulkImportForm({ onSave, onCancel }) {
       <div className="px-5">
         {phase === 'upload' && (
           <>
+            <div
+              className="card mb-3 p-3"
+              style={{ background: 'var(--accent-soft)', borderColor: 'transparent' }}
+            >
+              <div className="uppercase-label" style={{ color: 'var(--accent)', marginBottom: 6 }}>
+                Required: daily summary
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4 }}>
+                Include a screenshot of your <strong>day summary</strong> screen — the one that lists every batch with its time and total (e.g. "Sun, Apr 26 · Total $184.06 · 7 batches"). Without it, batches won't group reliably.
+              </div>
+              <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+                Then add the offer / batch-summary screenshots for each batch.
+              </div>
+            </div>
+
             <div className="card-strong p-3">
               <div className="flex items-baseline justify-between mb-2">
                 <div className="uppercase-label">Screenshots</div>
@@ -915,7 +937,7 @@ function BulkImportForm({ onSave, onCancel }) {
               </div>
 
               <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>
-                Add screenshots from one or more batches. The backend uses each image's capture time + content (store, items, pay) to group them into batches automatically.
+                Order doesn't matter — the app sorts and groups automatically.
               </div>
 
               {shots.length > 0 && (
@@ -990,6 +1012,34 @@ function BulkImportForm({ onSave, onCancel }) {
 
         {phase === 'review' && (
           <>
+            {meta.indexFound ? (
+              <div
+                className="card mb-3 p-3"
+                style={{ background: 'var(--green-soft)', borderColor: 'transparent' }}
+              >
+                <div style={{ fontSize: 13, color: 'var(--green)', fontWeight: 500 }}>
+                  ✓ Day summary detected — {candidates.length} of {meta.expectedCount} batch{meta.expectedCount === 1 ? '' : 'es'} matched
+                </div>
+                {meta.unmatchedImages?.length > 0 && (
+                  <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+                    {meta.unmatchedImages.length} image{meta.unmatchedImages.length === 1 ? '' : 's'} couldn't be matched to a batch.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div
+                className="card mb-3 p-3"
+                style={{ background: 'var(--red-soft)', borderColor: 'transparent' }}
+              >
+                <div style={{ fontSize: 13, color: 'var(--red)', fontWeight: 500, marginBottom: 4 }}>
+                  No day summary detected
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--ink-soft)', lineHeight: 1.4 }}>
+                  Without the summary screen, batch grouping is unreliable — totals and stores below may be wrong. Cancel, take a screenshot of the day summary, and re-import.
+                </div>
+              </div>
+            )}
+
             <div className="uppercase-label mb-3">{candidates.length} batch{candidates.length === 1 ? '' : 'es'} found</div>
             <div className="space-y-3 mb-6">
               {candidates.map(c => {
