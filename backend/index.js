@@ -31,11 +31,20 @@ The "store" field is important and on OFFER screens the store may only be identi
 - Petco: blue wordmark
 If the logo color and shape don't match any of the above, do your best from any visible text or pin styling.
 
+For "type", use these cues in order of priority:
+  1. Authoritative text on offer screens: "X shop and deliver" → shop_deliver, "X shop only" → shop_only, "X delivery only" → delivery_only.
+  2. Journey timeline on batch-summary screens (most reliable when offer text isn't present):
+     - "Your location → Store" with NO further legs to customer addresses → shop_only
+     - "Your location → Store → Customer address(es)" → shop_deliver
+     - "Your location → Pickup point → Customer address(es)" with no shopping leg at a retail store → delivery_only
+  3. Map pin pattern on offer screens: only a store pin and the user's location → likely shop_only; multiple home/destination pins around the store → likely shop_deliver.
+The total number of "shop and deliver" / "shop only" / "delivery only" in the offer text is also the "stops" count.
+
 {
   "type": "shop_deliver" | "shop_only" | "delivery_only" | null,
   "pay": number — total pay shown (batch + tip) in dollars. If batch and tip are shown separately, sum them.,
   "tipAmount": number — tip portion if shown separately,
-  "miles": number — miles traveled or estimated. For shop-only batches, the only mileage shown is usually distance to the store; use that.,
+  "miles": number — miles traveled or estimated. For shop_only batches, this is the distance from acceptance to the store (no delivery leg).,
   "items": number — total item count (e.g. "42 items"),
   "units": number — unit count if shown separately from items (e.g. "72 units"),
   "estMinutes": number — estimated or actual minutes (convert "52 min 37 sec" to 53),
