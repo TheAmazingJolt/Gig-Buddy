@@ -30,6 +30,13 @@ const dollarsPerMile = (b) => {
   if (!b.pay || !b.miles) return null;
   return b.pay / b.miles;
 };
+const isReconciled = (b) => b.actualPay != null;
+const payDelta = (b) => isReconciled(b) ? b.actualPay - b.pay : null;
+const actualPerHour = (b) => {
+  const mins = b.actualMinutes || b.estMinutes;
+  if (!b.actualPay || !mins) return null;
+  return b.actualPay / (mins / 60);
+};
 
 const dayName = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday: 'short' });
 const hourOf = (ts) => new Date(ts).getHours();
@@ -390,7 +397,7 @@ function MetricCard({ label, value, sub }) {
   );
 }
 
-function Dashboard({ batches, onLog }) {
+function Dashboard({ batches, onLog, onReconcile }) {
   const stats = useMemo(() => {
     const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const weekBatches = batches.filter(b => b.loggedAt >= weekAgo);
@@ -479,7 +486,7 @@ function Dashboard({ batches, onLog }) {
           </div>
         ) : (
           <div className="space-y-2">
-            {recent.map(b => <BatchRow key={b.id} batch={b} />)}
+            {recent.map(b => <BatchRow key={b.id} batch={b} onReconcile={onReconcile} />)}
           </div>
         )}
       </div>
@@ -487,7 +494,7 @@ function Dashboard({ batches, onLog }) {
   );
 }
 
-function BatchRow({ batch, onDelete }) {
+function BatchRow({ batch, onDelete, onReconcile }) {
   const typeLabel = {
     shop_deliver: 'Shop & deliver',
     shop_only: 'Shop only',
@@ -496,6 +503,10 @@ function BatchRow({ batch, onDelete }) {
   const milesLabel = batch.type === 'shop_only'
     ? `${batch.miles}mi to store`
     : `${batch.miles}mi`;
+
+  const reconciled = isReconciled(batch);
+  const delta = payDelta(batch);
+  const tipBait = delta != null && delta < 0;
 
   return (
     <div className="card p-4 fade-in">
@@ -541,6 +552,36 @@ function BatchRow({ batch, onDelete }) {
               )}
             </div>
           )}
+
+          {batch.accepted && reconciled && (
+            <div
+              className="mono mt-2"
+              style={{
+                fontSize: 12,
+                padding: '6px 10px',
+                borderRadius: 8,
+                background: tipBait ? 'var(--red-soft)' : 'var(--green-soft)',
+                color: tipBait ? 'var(--red)' : 'var(--green)',
+                cursor: onReconcile ? 'pointer' : 'default'
+              }}
+              onClick={onReconcile ? () => onReconcile(batch) : undefined}
+            >
+              Final {fmt$(batch.actualPay)} · Δ {delta >= 0 ? '+' : '−'}{fmt$(Math.abs(delta))}
+              {actualPerHour(batch) != null && <> · {fmtRate(actualPerHour(batch))}/hr actual</>}
+            </div>
+          )}
+          {batch.accepted && !reconciled && onReconcile && (
+            <button
+              onClick={() => onReconcile(batch)}
+              style={{
+                marginTop: 8, padding: 0, background: 'none', border: 'none',
+                color: 'var(--accent)', fontSize: 12, fontWeight: 500,
+                cursor: 'pointer', fontFamily: 'inherit'
+              }}
+            >
+              + Add actual earnings
+            </button>
+          )}
         </div>
         {onDelete && (
           <button
@@ -556,8 +597,126 @@ function BatchRow({ batch, onDelete }) {
   );
 }
 
+function ReconcileForm({ batch, onSave, onCancel }) {
+  const [actualPay, setActualPay] = useState(batch.actualPay != null ? String(batch.actualPay) : '');
+  const [actualTip, setActualTip] = useState(batch.actualTip != null ? String(batch.actualTip) : '');
+  const [actualMinutes, setActualMinutes] = useState(batch.actualMinutes != null ? String(batch.actualMinutes) : '');
+
+  const canSave = actualPay && !isNaN(parseFloat(actualPay));
+
+  const submit = () => {
+    onSave({
+      ...batch,
+      actualPay: parseFloat(actualPay),
+      actualTip: actualTip ? parseFloat(actualTip) : null,
+      actualMinutes: actualMinutes ? parseFloat(actualMinutes) : null,
+      reconciledAt: Date.now()
+    });
+  };
+
+  const clear = () => {
+    onSave({
+      ...batch,
+      actualPay: null,
+      actualTip: null,
+      actualMinutes: null,
+      reconciledAt: null
+    });
+  };
+
+  const offerSummary = `Offer: ${fmt$(batch.pay)}${batch.tipAmount != null ? ` (incl. ${fmt$(batch.tipAmount)} tip)` : ''} · ${batch.estMinutes ?? '—'}min · ${batch.store || '—'}`;
+
+  return (
+    <div className="modal">
+      <div className="px-5 pt-6 pb-4 flex items-center justify-between" style={{ background: 'var(--bg)' }}>
+        <button onClick={onCancel} className="btn-ghost" style={{ padding: '8px 14px', fontSize: 14 }}>
+          <ArrowLeft size={16} style={{ display: 'inline', marginRight: 4 }} /> Cancel
+        </button>
+        <div className="display" style={{ fontSize: 22, fontWeight: 600 }}>Reconcile</div>
+        <div style={{ width: 80 }} />
+      </div>
+
+      <div className="px-5">
+        <div className="card p-3 mb-4" style={{ fontSize: 12, color: 'var(--muted)' }}>
+          {offerSummary}
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <div className="uppercase-label mb-2">Actual pay (total)</div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted)', fontSize: 17, fontFamily: 'IBM Plex Mono, monospace' }}>$</span>
+              <input
+                className="input"
+                type="number"
+                inputMode="decimal"
+                step="0.01"
+                placeholder="0.00"
+                value={actualPay}
+                onChange={e => setActualPay(e.target.value)}
+                style={{ paddingLeft: 28 }}
+                autoFocus
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="uppercase-label mb-2">Actual tip</div>
+              <div style={{ position: 'relative' }}>
+                <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted)', fontSize: 17, fontFamily: 'IBM Plex Mono, monospace' }}>$</span>
+                <input
+                  className="input"
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  placeholder="—"
+                  value={actualTip}
+                  onChange={e => setActualTip(e.target.value)}
+                  style={{ paddingLeft: 28 }}
+                />
+              </div>
+            </div>
+            <div>
+              <div className="uppercase-label mb-2">Actual minutes</div>
+              <input
+                className="input"
+                type="number"
+                inputMode="numeric"
+                placeholder="—"
+                value={actualMinutes}
+                onChange={e => setActualMinutes(e.target.value)}
+              />
+            </div>
+          </div>
+        </div>
+
+        <button
+          onClick={submit}
+          className="btn-primary mt-6"
+          disabled={!canSave}
+          style={{ opacity: canSave ? 1 : 0.4 }}
+        >
+          Save
+        </button>
+
+        {isReconciled(batch) && (
+          <button
+            onClick={clear}
+            className="btn-ghost mt-3 mb-8"
+            style={{ width: '100%', color: 'var(--red)', borderColor: 'var(--red-soft)' }}
+          >
+            Clear reconciliation
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LogForm({ onSave, onCancel }) {
   const [pay, setPay] = useState('');
+  const [tipAmount, setTipAmount] = useState(null); // hidden, only set by extraction
   const [miles, setMiles] = useState('');
   const [minutes, setMinutes] = useState('');
   const [items, setItems] = useState('');
@@ -591,6 +750,7 @@ function LogForm({ onSave, onCancel }) {
     let total = totalKey;
     if (total == null && batchPart != null) total = batchPart + (tipPart || 0);
     if (total != null) setPay(String(total));
+    if (tipPart != null) setTipAmount(tipPart);
 
     const miles_ = num(data.miles ?? data.mi ?? data.distance);
     if (miles_ != null) setMiles(String(miles_));
@@ -718,6 +878,7 @@ function LogForm({ onSave, onCancel }) {
       loggedAt: Date.now(),
       type,
       pay: parseFloat(pay),
+      tipAmount: tipAmount,
       miles: parseFloat(miles),
       estMinutes: minutes ? parseFloat(minutes) : null,
       items: items ? parseInt(items) : null,
@@ -726,7 +887,11 @@ function LogForm({ onSave, onCancel }) {
       store: finalStore || null,
       accepted,
       notes: notes || null,
-      source: 'quick'
+      source: 'quick',
+      actualPay: null,
+      actualTip: null,
+      actualMinutes: null,
+      reconciledAt: null
     };
     onSave(batch);
   };
@@ -1045,7 +1210,7 @@ function LogForm({ onSave, onCancel }) {
   );
 }
 
-function BatchList({ batches, onDelete }) {
+function BatchList({ batches, onDelete, onReconcile }) {
   const [filter, setFilter] = useState('all'); // 'all' | 'accepted' | 'declined'
 
   const filtered = useMemo(() => {
@@ -1080,7 +1245,7 @@ function BatchList({ batches, onDelete }) {
             Nothing here yet
           </div>
         ) : (
-          filtered.map(b => <BatchRow key={b.id} batch={b} onDelete={onDelete} />)
+          filtered.map(b => <BatchRow key={b.id} batch={b} onDelete={onDelete} onReconcile={onReconcile} />)
         )}
       </div>
     </div>
@@ -1326,6 +1491,7 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState('home'); // 'home' | 'list' | 'insights'
   const [showLog, setShowLog] = useState(false);
+  const [reconcilingBatch, setReconcilingBatch] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1339,6 +1505,13 @@ export default function App() {
     const next = [b, ...batches];
     setBatches(next);
     setShowLog(false);
+    await saveBatches(next);
+  };
+
+  const updateBatch = async (updated) => {
+    const next = batches.map(b => b.id === updated.id ? updated : b);
+    setBatches(next);
+    setReconcilingBatch(null);
     await saveBatches(next);
   };
 
@@ -1358,14 +1531,22 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === 'home' && <Dashboard batches={batches} onLog={() => setShowLog(true)} />}
-            {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} />}
+            {view === 'home' && <Dashboard batches={batches} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} />}
+            {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} />}
             {view === 'insights' && <Insights batches={batches} />}
           </>
         )}
 
         {showLog && (
           <LogForm onSave={addBatch} onCancel={() => setShowLog(false)} />
+        )}
+
+        {reconcilingBatch && (
+          <ReconcileForm
+            batch={reconcilingBatch}
+            onSave={updateBatch}
+            onCancel={() => setReconcilingBatch(null)}
+          />
         )}
 
         {!showLog && (
