@@ -479,7 +479,7 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
     const weekBatches = batches.filter(b => batchTime(b) >= weekAgo);
     const accepted = weekBatches.filter(b => b.accepted);
     const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
-    const totalMin = accepted.reduce((s, b) => s + (b.estMinutes || 0), 0);
+    const totalMin = accepted.reduce((s, b) => s + (bestMinutes(b) || 0), 0);
     const totalMiles = accepted.reduce((s, b) => s + (b.miles || 0), 0);
 
     return {

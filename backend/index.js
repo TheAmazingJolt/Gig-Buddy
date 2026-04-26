@@ -50,6 +50,21 @@ function requireDb(req, res, next) {
   next();
 }
 
+// Trust the model's per-leg enumeration over its arithmetic. If mileLegs is
+// a non-empty array of numbers, overwrite miles with the actual sum.
+function reconcileMileage(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const legs = obj.mileLegs ?? obj.mileLegs;
+  if (Array.isArray(legs) && legs.length) {
+    const nums = legs.map(Number).filter(n => Number.isFinite(n));
+    if (nums.length) {
+      const sum = Math.round(nums.reduce((a, b) => a + b, 0) * 10) / 10;
+      obj.miles = sum;
+    }
+  }
+  return obj;
+}
+
 const EXTRACT_PROMPT = `You will see one or more screenshots from the Instacart Shopper app. Identify the screen type for each, then extract data accordingly.
 
 Screen types:
@@ -108,7 +123,8 @@ For TIMELINE timestamps on summary screens, look at the journey timeline (the ve
   "type": "shop_deliver" | "shop_only" | "delivery_only" | "mixed" | null,
   "pay": number — pay shown on the screen (offer total or summary total). If batch and tip are shown separately, sum them.,
   "tipAmount": number — tip portion if shown separately,
-  "miles": number — TOTAL miles for the entire batch. On a batch summary screen the journey timeline lists per-leg distances ("Distance: 0.2 miles" to the store, then "Distance: 10.9 miles" per delivery leg); SUM these into one total. For shop_only batches with no delivery legs, this is just the to-store distance.,
+  "miles": number — sum of all "Distance: N miles" legs in the journey. Compute by summing every leg distance shown.,
+  "mileLegs": array of numbers — every "Distance: N miles" leg in journey order. To-store distance first, then each delivery leg. For shop_only with no delivery legs, this is a one-element array with just the to-store distance. Example: a 3-order shop&deliver batch shows "Distance: 3.4 miles" to the store, then "Distance: 2.8 miles" + "Distance: 5.4 miles" + "Distance: 1.7 miles" for the three deliveries → mileLegs: [3.4, 2.8, 5.4, 1.7]. miles MUST equal the sum of mileLegs.,
   "items": number — total item count summed across all orders,
   "units": number — unit count summed across all orders,
   "estMinutes": number — set ONLY on offer screens,
@@ -226,6 +242,7 @@ app.post('/extract', async (req, res) => {
       return res.status(502).json({ error: 'JSON parse failed', raw: stripped.slice(first, last + 1).slice(0, 200) });
     }
 
+    reconcileMileage(parsed);
     res.json({ ok: true, data: parsed, model: MODEL, imageCount: images.length });
   } catch (e) {
     console.error('Extract error:', e);
@@ -317,6 +334,7 @@ Return ONLY a valid JSON object — no markdown, no code fences, no prose:
       "pay": number,
       "tipAmount": number | null,
       "miles": number | null,
+      "mileLegs": [number, ...],
       "items": number | null,
       "units": number | null,
       "estMinutes": number | null,
@@ -358,7 +376,7 @@ Return ONLY a valid JSON object — no markdown, no code fences, no prose:
       return res.status(502).json({ error: 'JSON parse failed', raw: stripped.slice(first, last + 1).slice(0, 200) });
     }
 
-    const batches = Array.isArray(parsed?.batches) ? parsed.batches : [];
+    const batches = (Array.isArray(parsed?.batches) ? parsed.batches : []).map(reconcileMileage);
     res.json({
       ok: true,
       batches,
