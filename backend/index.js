@@ -14,6 +14,23 @@ const EXTRACT_PROMPT = `You will see one or more screenshots from the Instacart 
 
 Return ONLY a valid JSON object — no markdown, no code fences, no prose. Use null for any field not visible across the images.
 
+The "store" field is important and on OFFER screens the store may only be identifiable from a colored map-pin logo (no text label). Use these visual cues:
+- Publix: green circle with white "P"
+- Aldi: orange/red "ALDI" wordmark
+- Costco: red "Costco" wordmark on white
+- Target: red bullseye
+- Trader Joe's: red script wordmark
+- Sprouts: green leaf, "Sprouts Farmers Market"
+- Whole Foods: dark green "WF" leaf
+- Kroger: blue cursive wordmark
+- Wegmans: red wordmark
+- Safeway: red "S" / red wordmark
+- Sam's Club: dark blue rectangle with yellow
+- BJ's: red and white "BJ's"
+- CVS: red wordmark
+- Petco: blue wordmark
+If the logo color and shape don't match any of the above, do your best from any visible text or pin styling.
+
 {
   "type": "shop_deliver" | "shop_only" | "delivery_only" | null,
   "pay": number — total pay shown (batch + tip) in dollars. If batch and tip are shown separately, sum them.,
@@ -24,7 +41,7 @@ Return ONLY a valid JSON object — no markdown, no code fences, no prose. Use n
   "estMinutes": number — estimated or actual minutes (convert "52 min 37 sec" to 53),
   "store": string — primary store name (read from logo or text, e.g. "Aldi", "Publix"),
   "stops": number — number of orders/customers (e.g. "2 shop and deliver" or "2 orders" = 2; default 1),
-  "notes": string — any salient detail worth remembering (optional)
+  "notes": string — any salient detail worth remembering. Include "guaranteed earnings applied" if you see that badge, plus any timestamps or shop/deliver time splits.
 }`;
 
 app.get('/', (req, res) => {
