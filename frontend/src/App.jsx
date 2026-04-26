@@ -575,6 +575,7 @@ function BatchRow({ batch, onDelete, onReconcile }) {
             {batch.items != null && <> · {batch.items}i</>}
             {batch.units != null && <>/{batch.units}u</>}
             {batch.stops != null && batch.stops > 1 && <> · {batch.stops} stops</>}
+            {batch.orders != null && batch.orders > 1 && <> · {batch.orders} orders</>}
           </div>
           {(dollarsPerHour(batch) != null || dollarsPerMile(batch) != null) && (
             <div className="mono mt-1" style={{ fontSize: 12 }}>
@@ -759,14 +760,18 @@ function LogForm({ onSave, onCancel }) {
   const [pay, setPay] = useState('');
   const [tipAmount, setTipAmount] = useState(null); // hidden, only set by extraction
   const [miles, setMiles] = useState('');
-  const [minutes, setMinutes] = useState('');
+  const [minutes, setMinutes] = useState('');         // estimated (offer time)
+  const [actualMinutes, setActualMinutes] = useState(''); // from summary "Active hours"
+  const [actualPay, setActualPay] = useState('');     // final pay if from summary
   const [items, setItems] = useState('');
   const [units, setUnits] = useState('');
   const [stops, setStops] = useState('1');
+  const [orders, setOrders] = useState('1');
   const [store, setStore] = useState('');
   const [storeOther, setStoreOther] = useState('');
   const [notes, setNotes] = useState('');
   const [type, setType] = useState('shop_deliver');
+  const [fromSummary, setFromSummary] = useState(false); // set by extraction when screenType === 'summary'
   const [mode, setMode] = useState(null); // null | 'paste' | 'shots'
   const [pasteText, setPasteText] = useState('');
   const [pasteError, setPasteError] = useState(null);
@@ -796,8 +801,23 @@ function LogForm({ onSave, onCancel }) {
     const miles_ = num(data.miles ?? data.mi ?? data.distance);
     if (miles_ != null) setMiles(String(miles_));
 
-    const mins = num(data.minutes ?? data.min ?? data.time ?? data.estminutes ?? data.activeminutes);
-    if (mins != null) setMinutes(String(Math.round(mins)));
+    // Time: prefer estimated for offer screens, actual for summary screens
+    const screenType = String(data.screentype || data.screen_type || data.screen || '').toLowerCase();
+    const estMins = num(data.estminutes ?? data.estminute ?? data.estimatedminutes);
+    const actualMins = num(data.actualminutes ?? data.activeminutes ?? data.activetime);
+    const genericMins = num(data.minutes ?? data.min ?? data.time);
+
+    if (estMins != null) setMinutes(String(Math.round(estMins)));
+    else if (screenType === 'offer' && genericMins != null) setMinutes(String(Math.round(genericMins)));
+
+    if (actualMins != null) setActualMinutes(String(Math.round(actualMins)));
+    else if (screenType === 'summary' && genericMins != null) setActualMinutes(String(Math.round(genericMins)));
+
+    // If summary screen, the displayed pay IS the actual pay; mirror it for reconciliation
+    if (screenType === 'summary' && total != null) {
+      setActualPay(String(total));
+      setFromSummary(true);
+    }
 
     const items_ = num(data.items);
     if (items_ != null) setItems(String(Math.round(items_)));
@@ -805,8 +825,11 @@ function LogForm({ onSave, onCancel }) {
     const units_ = num(data.units);
     if (units_ != null) setUnits(String(Math.round(units_)));
 
-    const stops_ = num(data.stops ?? data.orders);
+    const stops_ = num(data.stops);
     if (stops_ != null) setStops(String(Math.round(stops_)));
+
+    const orders_ = num(data.orders);
+    if (orders_ != null) setOrders(String(Math.round(orders_)));
 
     const storeName = data.store;
     if (storeName) {
@@ -916,6 +939,8 @@ function LogForm({ onSave, onCancel }) {
 
   const submit = (accepted) => {
     const finalStore = store === 'Other' ? storeOther : store;
+    const hasActual = (actualPay !== '' && !isNaN(parseFloat(actualPay))) ||
+                       (actualMinutes !== '' && !isNaN(parseFloat(actualMinutes)));
     const batch = {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
@@ -927,14 +952,15 @@ function LogForm({ onSave, onCancel }) {
       items: items ? parseInt(items) : null,
       units: units ? parseInt(units) : null,
       stops: stops ? parseInt(stops) : 1,
+      orders: orders ? parseInt(orders) : 1,
       store: finalStore || null,
       accepted,
       notes: notes || null,
       source: 'quick',
-      actualPay: null,
+      actualPay: actualPay !== '' ? parseFloat(actualPay) : null,
       actualTip: null,
-      actualMinutes: null,
-      reconciledAt: null
+      actualMinutes: actualMinutes !== '' ? parseFloat(actualMinutes) : null,
+      reconciledAt: hasActual ? Date.now() : null
     };
     onSave(batch);
   };
@@ -1180,6 +1206,42 @@ function LogForm({ onSave, onCancel }) {
               />
             </div>
             <div>
+              <div className="uppercase-label mb-2">Actual minutes</div>
+              <input
+                className="input"
+                type="number"
+                inputMode="numeric"
+                placeholder="—"
+                value={actualMinutes}
+                onChange={e => setActualMinutes(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {fromSummary && (
+            <div>
+              <div className="uppercase-label mb-2">Actual pay</div>
+              <div style={{ position: 'relative' }}>
+                <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted)', fontSize: 17, fontFamily: 'IBM Plex Mono, monospace' }}>$</span>
+                <input
+                  className="input"
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  placeholder="—"
+                  value={actualPay}
+                  onChange={e => setActualPay(e.target.value)}
+                  style={{ paddingLeft: 28 }}
+                />
+              </div>
+              <div className="mono mt-1" style={{ fontSize: 11, color: 'var(--muted)' }}>
+                Logging from summary — saving as already-reconciled.
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
               <div className="uppercase-label mb-2">Stops</div>
               <input
                 className="input"
@@ -1189,6 +1251,19 @@ function LogForm({ onSave, onCancel }) {
                 value={stops}
                 onChange={e => setStops(e.target.value)}
               />
+              <div className="mono mt-1" style={{ fontSize: 10, color: 'var(--muted)' }}>physical destinations</div>
+            </div>
+            <div>
+              <div className="uppercase-label mb-2">Orders</div>
+              <input
+                className="input"
+                type="number"
+                inputMode="numeric"
+                placeholder="1"
+                value={orders}
+                onChange={e => setOrders(e.target.value)}
+              />
+              <div className="mono mt-1" style={{ fontSize: 10, color: 'var(--muted)' }}>customer count</div>
             </div>
           </div>
 

@@ -50,7 +50,13 @@ function requireDb(req, res, next) {
   next();
 }
 
-const EXTRACT_PROMPT = `You will see one or more screenshots from the Instacart Shopper app — they may show an offer screen, a batch summary, an item detail panel, or other batch-related views. Combine information across all images to extract structured data.
+const EXTRACT_PROMPT = `You will see one or more screenshots from the Instacart Shopper app. Identify the screen type for each, then extract data accordingly.
+
+Screen types:
+- "offer": pre-acceptance offer with a prominent green "Accept" button, batch pay/tip breakdown, "X shop and deliver" / "X shop only" / "X delivery only" lines, and a map showing pins around the store. Times here are ESTIMATED.
+- "summary": post-completion "Batch summary" screen with a header titled "Batch summary", a "Batch pay" / "Tips" / "Total" breakdown, an "Active hours" line, and a journey timeline (Accepted at Your location → Arrival at Store [→ delivery legs]). Times here are ACTUAL.
+- "item_detail": single-item view, less commonly useful.
+- "unknown": anything else.
 
 Return ONLY a valid JSON object — no markdown, no code fences, no prose. Use null for any field not visible across the images.
 
@@ -71,27 +77,42 @@ The "store" field is important and on OFFER screens the store may only be identi
 - Petco: blue wordmark
 If the logo color and shape don't match any of the above, do your best from any visible text or pin styling.
 
-For "type", use these cues in order of priority:
-  1. Authoritative text on offer screens: "X shop and deliver" → shop_deliver, "X shop only" → shop_only, "X delivery only" → delivery_only.
-  2. HYBRID batches: if the offer screen shows BOTH a "shop and deliver" line AND a "shop only" line (or any combination of two different categories) → set type to "mixed". Capture the breakdown in notes (e.g. "1 shop-and-deliver, 1 shop-only").
-  3. Journey timeline on batch-summary screens (most reliable when offer text isn't present):
-     - "Your location → Store" with NO further legs to customer addresses → shop_only
-     - "Your location → Store → Customer address(es)" → shop_deliver
-     - "Your location → Pickup point → Customer address(es)" with no shopping leg at a retail store → delivery_only
-  4. Map pin pattern on offer screens: only a store pin and the user's location → likely shop_only; multiple home/destination pins around the store → likely shop_deliver.
-The total number of "shop and deliver" / "shop only" / "delivery only" lines in the offer text summed together is the "stops" count.
+For "type", use the FIRST applicable rule in priority order:
+  1. SUMMARY SCREEN: the journey timeline is the ONLY authoritative type signal. Count its visible legs:
+     - Exactly ONE leg ("Your location → Store") with NO further legs to customer addresses: type = "shop_only". This holds even if the screen also says "2 orders" or any order count — multiple orders at one store is still ONE stop and shop_only.
+     - TWO OR MORE legs ("Your location → Store → Customer address(es)"): type = "shop_deliver".
+     - Journey starts at a non-retail pickup point and goes to customer addresses with no shopping leg: type = "delivery_only".
+  2. OFFER SCREEN with explicit text labels: "X shop and deliver" → "shop_deliver", "X shop only" → "shop_only", "X delivery only" → "delivery_only".
+  3. HYBRID OFFER (offer screen showing two different category lines, e.g. "1 shop and deliver" + "1 shop only"): type = "mixed". Capture the per-category breakdown in notes.
+  4. OFFER SCREEN with no text labels: only a store pin and the user's location → likely shop_only; store + multiple home pins around it → likely shop_deliver.
+
+For "stops" — the number of PHYSICAL DESTINATIONS the shopper visits, NOT the count of orders/customers:
+  - shop_only at one store = 1 (the store is the only stop, regardless of order count)
+  - shop_deliver = 1 (the store) + the number of distinct customer addresses delivered to
+  - delivery_only = the number of distinct customer addresses
+  - mixed = unique physical locations (store + delivery addresses)
+  - default 1
+
+For "orders" — the count of CUSTOMERS or distinct orders. "2 orders" at one Publix means orders: 2 even though stops: 1. Read directly from "X orders", "X shop and deliver", "X shop only" lines.
+
+For TIME fields:
+  - "estMinutes": ONLY set when reading an OFFER screen (estimated time before acceptance). Convert "52 min" or "52 min 37 sec" to a single integer.
+  - "actualMinutes": ONLY set when reading a SUMMARY screen — read from "Active hours" or the equivalent completion-time field. Convert "52 min 37 sec" to 53.
 
 {
+  "screenType": "offer" | "summary" | "item_detail" | "unknown",
   "type": "shop_deliver" | "shop_only" | "delivery_only" | "mixed" | null,
-  "pay": number — total pay shown (batch + tip) in dollars. If batch and tip are shown separately, sum them.,
+  "pay": number — pay shown on the screen (offer total or summary total). If batch and tip are shown separately, sum them.,
   "tipAmount": number — tip portion if shown separately,
-  "miles": number — miles traveled or estimated. For shop_only batches, this is the distance from acceptance to the store (no delivery leg).,
-  "items": number — total item count summed across all orders (e.g. "23 items" if breakdown is 2 + 21),
-  "units": number — unit count summed across all orders (e.g. "32 units" if breakdown is 5 + 27),
-  "estMinutes": number — estimated or actual minutes (convert "52 min 37 sec" to 53),
-  "store": string — primary store name (read from logo or text, e.g. "Aldi", "Publix"),
-  "stops": number — total number of orders/customers across all categories (e.g. "1 shop and deliver" + "1 shop only" = 2; default 1),
-  "notes": string — any salient detail worth remembering. Include "guaranteed earnings applied" if you see that badge, the per-category breakdown for mixed batches, plus any timestamps or shop/deliver time splits.
+  "miles": number — miles. For shop_only batches, this is the distance from acceptance to the store (no delivery leg).,
+  "items": number — total item count summed across all orders,
+  "units": number — unit count summed across all orders,
+  "estMinutes": number — set ONLY on offer screens,
+  "actualMinutes": number — set ONLY on summary screens (from "Active hours"),
+  "store": string,
+  "stops": number — physical destinations,
+  "orders": number — customer/order count,
+  "notes": string — guaranteed earnings note, mixed-batch breakdown, accepted/arrival timestamps from a summary's journey
 }`;
 
 app.get('/', (req, res) => {
