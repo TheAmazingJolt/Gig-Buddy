@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Check, X, BarChart2, List, Home, Trash2,
-  Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste
+  Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera
 } from 'lucide-react';
+
+const EXTRACTOR_URL = import.meta.env.VITE_EXTRACTOR_URL;
 
 const STORAGE_KEY = 'batches';
 
@@ -341,6 +343,8 @@ const Theme = () => (
       to { opacity: 1; transform: translateY(0); }
     }
     .fade-in { animation: fadeIn 0.3s ease-out; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .animate-spin { animation: spin 1s linear infinite; }
   `}</style>
 );
 
@@ -560,21 +564,17 @@ function LogForm({ onSave, onCancel }) {
   const [storeOther, setStoreOther] = useState('');
   const [notes, setNotes] = useState('');
   const [type, setType] = useState('shop_deliver');
-  const [showPaste, setShowPaste] = useState(false);
+  const [mode, setMode] = useState(null); // null | 'paste' | 'shots'
   const [pasteText, setPasteText] = useState('');
   const [pasteError, setPasteError] = useState(null);
-  const [pasteSuccess, setPasteSuccess] = useState(false);
+  const [extractSuccess, setExtractSuccess] = useState(false);
+  const [shots, setShots] = useState([]); // [{ name, dataUrl, base64, mediaType }]
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState(null);
 
   const canSave = pay && miles && (store || storeOther);
 
-  const handleParse = () => {
-    setPasteError(null);
-    setPasteSuccess(false);
-    const data = parsePaste(pasteText);
-    if (!data) {
-      setPasteError("Couldn't parse — expected JSON or key=value pairs");
-      return;
-    }
+  const applyExtracted = (data) => {
     const num = (v) => {
       if (v == null || v === '') return null;
       const n = parseFloat(String(v));
@@ -623,11 +623,89 @@ function LogForm({ onSave, onCancel }) {
         setType('delivery_only');
       }
     }
+  };
 
-    setPasteSuccess(true);
+  const flashSuccess = () => {
+    setExtractSuccess(true);
+    setTimeout(() => setExtractSuccess(false), 2500);
+  };
+
+  const handleParse = () => {
+    setPasteError(null);
+    setExtractSuccess(false);
+    const data = parsePaste(pasteText);
+    if (!data) {
+      setPasteError("Couldn't parse — expected JSON or key=value pairs");
+      return;
+    }
+    applyExtracted(data);
     setPasteText('');
-    setShowPaste(false);
-    setTimeout(() => setPasteSuccess(false), 2500);
+    setMode(null);
+    flashSuccess();
+  };
+
+  const handleFiles = async (e) => {
+    const incoming = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!incoming.length) return;
+    const room = 8 - shots.length;
+    const files = incoming.slice(0, room);
+
+    const next = await Promise.all(files.map(file => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result);
+        const comma = dataUrl.indexOf(',');
+        const meta = dataUrl.slice(5, comma); // strip "data:"
+        const mediaType = meta.split(';')[0] || file.type || 'image/jpeg';
+        const base64 = dataUrl.slice(comma + 1);
+        resolve({ name: file.name, dataUrl, base64, mediaType });
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    })));
+
+    setShots(prev => [...prev, ...next].slice(0, 8));
+  };
+
+  const removeShot = (idx) => {
+    setShots(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleExtract = async () => {
+    setExtractError(null);
+    if (!EXTRACTOR_URL) {
+      setExtractError('VITE_EXTRACTOR_URL is not set — check frontend env config');
+      return;
+    }
+    if (!shots.length) return;
+
+    setExtracting(true);
+    try {
+      const url = EXTRACTOR_URL.replace(/\/$/, '') + '/extract';
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          images: shots.map(s => ({ data: s.base64, mediaType: s.mediaType }))
+        })
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || `Extraction failed (HTTP ${res.status})`);
+      }
+      // Backend returns camelCase keys; lowercase them so applyExtracted's aliases match.
+      const lowered = {};
+      for (const k of Object.keys(json.data || {})) lowered[k.toLowerCase()] = json.data[k];
+      applyExtracted(lowered);
+      setShots([]);
+      setMode(null);
+      flashSuccess();
+    } catch (err) {
+      setExtractError(err.message || 'Extraction failed');
+    } finally {
+      setExtracting(false);
+    }
   };
 
   const submit = (accepted) => {
@@ -662,16 +740,28 @@ function LogForm({ onSave, onCancel }) {
 
       <div className="px-5">
         <div className="mb-4">
-          {!showPaste ? (
-            <button
-              onClick={() => { setShowPaste(true); setPasteError(null); }}
-              className="btn-ghost"
-              style={{ width: '100%', padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
-            >
-              <ClipboardPaste size={14} />
-              Paste extracted data
-            </button>
-          ) : (
+          {mode === null && (
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setMode('shots'); setExtractError(null); }}
+                className="btn-ghost"
+                style={{ flex: 1, padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+              >
+                <Camera size={14} />
+                Screenshots
+              </button>
+              <button
+                onClick={() => { setMode('paste'); setPasteError(null); }}
+                className="btn-ghost"
+                style={{ flex: 1, padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+              >
+                <ClipboardPaste size={14} />
+                Paste data
+              </button>
+            </div>
+          )}
+
+          {mode === 'paste' && (
             <div className="card-strong p-3">
               <div className="uppercase-label mb-2">Paste from chat</div>
               <textarea
@@ -683,7 +773,7 @@ function LogForm({ onSave, onCancel }) {
               />
               <div className="flex gap-2 mt-2">
                 <button
-                  onClick={() => { setShowPaste(false); setPasteText(''); setPasteError(null); }}
+                  onClick={() => { setMode(null); setPasteText(''); setPasteError(null); }}
                   className="btn-ghost"
                   style={{ flex: 1, padding: '10px', fontSize: 13 }}
                 >
@@ -705,7 +795,85 @@ function LogForm({ onSave, onCancel }) {
               )}
             </div>
           )}
-          {pasteSuccess && !showPaste && (
+
+          {mode === 'shots' && (
+            <div className="card-strong p-3">
+              <div className="flex items-baseline justify-between mb-2">
+                <div className="uppercase-label">Screenshots</div>
+                <div className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>{shots.length}/8</div>
+              </div>
+
+              {shots.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 6, marginBottom: 8 }}>
+                  {shots.map((s, i) => (
+                    <div key={i} style={{ position: 'relative', flex: '0 0 auto' }}>
+                      <img
+                        src={s.dataUrl}
+                        alt={`shot ${i + 1}`}
+                        style={{ height: 88, width: 'auto', borderRadius: 8, border: '1px solid var(--border)', display: 'block' }}
+                      />
+                      <button
+                        onClick={() => removeShot(i)}
+                        aria-label="Remove"
+                        style={{
+                          position: 'absolute', top: -6, right: -6, width: 22, height: 22,
+                          borderRadius: 11, border: 'none', background: 'var(--ink)', color: 'var(--surface)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+                          padding: 0
+                        }}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {shots.length < 8 && (
+                <label
+                  className="btn-ghost"
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px', fontSize: 13, cursor: 'pointer' }}
+                >
+                  <Camera size={14} />
+                  {shots.length === 0 ? 'Choose images (1–8)' : 'Add more'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleFiles}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+              )}
+
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={() => { setMode(null); setShots([]); setExtractError(null); }}
+                  className="btn-ghost"
+                  style={{ flex: 1, padding: '10px', fontSize: 13 }}
+                  disabled={extracting}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleExtract}
+                  className="btn-primary"
+                  style={{ flex: 1, padding: '10px', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                  disabled={!shots.length || extracting}
+                >
+                  {extracting ? <><Loader2 size={14} className="animate-spin" /> Extracting…</> : 'Extract'}
+                </button>
+              </div>
+
+              {extractError && (
+                <div className="mt-2 p-2" style={{ background: 'var(--red-soft)', borderRadius: 6, fontSize: 12, color: 'var(--red)' }}>
+                  {extractError}
+                </div>
+              )}
+            </div>
+          )}
+
+          {extractSuccess && mode === null && (
             <div className="mt-2 p-2 fade-in" style={{ background: 'var(--green-soft)', borderRadius: 6, fontSize: 12, color: 'var(--green)' }}>
               <Check size={12} style={{ display: 'inline', marginRight: 6, verticalAlign: 'text-bottom' }} />
               Parsed — review fields below
