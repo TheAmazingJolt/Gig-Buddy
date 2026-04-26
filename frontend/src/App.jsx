@@ -26,6 +26,27 @@ function parseTs(v) {
   return Number.isNaN(ms) ? null : ms;
 }
 
+// Downscale + JPEG-encode a dataUrl so we can keep batch screenshots inline
+// without bloating storage. Targets ~30-80KB per image at quality 0.7.
+async function downscaleImage(dataUrl, maxW = 800, maxH = 1600, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const ratio = Math.min(maxW / img.width, maxH / img.height, 1);
+      const w = Math.max(1, Math.round(img.width * ratio));
+      const h = Math.max(1, Math.round(img.height * ratio));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
 const STORAGE_KEY = 'batches';
 
 const DEFAULT_STORES = [
@@ -452,7 +473,7 @@ function MetricCard({ label, value, sub }) {
   );
 }
 
-function Dashboard({ batches, onLog, onReconcile, syncStatus }) {
+function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
   const stats = useMemo(() => {
     const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const weekBatches = batches.filter(b => batchTime(b) >= weekAgo);
@@ -541,7 +562,7 @@ function Dashboard({ batches, onLog, onReconcile, syncStatus }) {
           </div>
         ) : (
           <div className="space-y-2">
-            {recent.map(b => <BatchRow key={b.id} batch={b} onReconcile={onReconcile} />)}
+            {recent.map(b => <BatchRow key={b.id} batch={b} onReconcile={onReconcile} onViewImages={onViewImages} />)}
           </div>
         )}
       </div>
@@ -549,7 +570,7 @@ function Dashboard({ batches, onLog, onReconcile, syncStatus }) {
   );
 }
 
-function BatchRow({ batch, onDelete, onReconcile }) {
+function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
   const typeLabel = {
     shop_deliver: 'Shop & deliver',
     shop_only: 'Shop only',
@@ -558,11 +579,12 @@ function BatchRow({ batch, onDelete, onReconcile }) {
   }[batch.type] || null;
   const milesLabel = batch.type === 'shop_only'
     ? `${batch.miles}mi to store`
-    : `${batch.miles}mi`;
+    : `${batch.miles}mi total`;
 
   const reconciled = isReconciled(batch);
   const delta = payDelta(batch);
   const tipBait = delta != null && delta < 0;
+  const images = Array.isArray(batch.images) ? batch.images : [];
 
   return (
     <div className="card p-4 fade-in">
@@ -645,6 +667,27 @@ function BatchRow({ batch, onDelete, onReconcile }) {
             >
               + Add actual earnings
             </button>
+          )}
+
+          {images.length > 0 && (
+            <div
+              style={{ display: 'flex', gap: 6, marginTop: 10, overflowX: 'auto' }}
+              onClick={() => onViewImages?.(batch)}
+              role={onViewImages ? 'button' : undefined}
+            >
+              {images.map((src, i) => (
+                <img
+                  key={i}
+                  src={src}
+                  alt={`screenshot ${i + 1}`}
+                  style={{
+                    height: 56, width: 'auto', borderRadius: 6,
+                    border: '1px solid var(--border-soft)', flex: '0 0 auto',
+                    cursor: onViewImages ? 'pointer' : 'default'
+                  }}
+                />
+              ))}
+            </div>
           )}
         </div>
         {onDelete && (
@@ -778,6 +821,43 @@ function ReconcileForm({ batch, onSave, onCancel }) {
   );
 }
 
+function ImageViewer({ batch, onClose }) {
+  const images = Array.isArray(batch.images) ? batch.images : [];
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)',
+        zIndex: 60, overflowY: 'auto', padding: '20px 12px',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12
+      }}
+    >
+      <button
+        onClick={onClose}
+        aria-label="Close"
+        style={{
+          position: 'sticky', top: 0, alignSelf: 'flex-end',
+          width: 36, height: 36, borderRadius: 18,
+          background: 'rgba(255,255,255,0.15)', color: 'white', border: 'none',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+          padding: 0
+        }}
+      >
+        <X size={20} />
+      </button>
+      {images.map((src, i) => (
+        <img
+          key={i}
+          src={src}
+          alt={`screenshot ${i + 1}`}
+          onClick={(e) => e.stopPropagation()}
+          style={{ maxWidth: '100%', height: 'auto', borderRadius: 8, display: 'block' }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function BulkImportForm({ onSave, onCancel }) {
   const [shots, setShots] = useState([]); // [{ name, dataUrl, base64, mediaType, takenAt }]
   const [phase, setPhase] = useState('upload'); // 'upload' | 'extracting' | 'review'
@@ -873,7 +953,7 @@ function BulkImportForm({ onSave, onCancel }) {
     return isNaN(n) ? null : n;
   };
 
-  const candidateToBatch = (c) => {
+  const candidateToBatch = async (c) => {
     const screenType = String(c.screentype || c.screen_type || '').toLowerCase();
     const total = num(c.pay ?? c.total);
     const tipPart = num(c.tip ?? c.tipamount);
@@ -894,6 +974,16 @@ function BulkImportForm({ onSave, onCancel }) {
     const fromSummary = screenType === 'summary';
     const hasActual = actualMins != null || (fromSummary && total != null);
 
+    const sourceShots = (c.imageindices || []).map(i => shots[i - 1]).filter(Boolean);
+    let images = null;
+    if (sourceShots.length) {
+      try {
+        images = await Promise.all(sourceShots.map(s => downscaleImage(s.dataUrl)));
+      } catch (e) {
+        console.error('image downscale failed', e);
+      }
+    }
+
     return {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
@@ -912,6 +1002,7 @@ function BulkImportForm({ onSave, onCancel }) {
       accepted: c._accepted,
       notes: c.notes || null,
       source: 'bulk',
+      images,
       actualPay: fromSummary && total != null ? total : null,
       actualTip: null,
       actualMinutes: actualMins != null ? Math.round(actualMins) : null,
@@ -919,8 +1010,10 @@ function BulkImportForm({ onSave, onCancel }) {
     };
   };
 
-  const saveAll = () => {
-    const kept = candidates.filter(c => c._kept).map(candidateToBatch);
+  const saveAll = async () => {
+    const kept = await Promise.all(
+      candidates.filter(c => c._kept).map(candidateToBatch)
+    );
     onSave(kept);
   };
 
@@ -1343,7 +1436,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
       const lowered = {};
       for (const k of Object.keys(json.data || {})) lowered[k.toLowerCase()] = json.data[k];
       applyExtracted(lowered);
-      setShots([]);
+      // Keep shots — they'll attach to the saved batch.
       setMode(null);
       flashSuccess();
     } catch (err) {
@@ -1353,10 +1446,21 @@ function LogForm({ onSave, onCancel, onBulk }) {
     }
   };
 
-  const submit = (accepted) => {
+  const submit = async (accepted) => {
     const finalStore = store === 'Other' ? storeOther : store;
     const hasActual = (actualPay !== '' && !isNaN(parseFloat(actualPay))) ||
                        (actualMinutes !== '' && !isNaN(parseFloat(actualMinutes)));
+
+    let images = null;
+    if (shots.length) {
+      try {
+        const compressed = await Promise.all(shots.map(s => downscaleImage(s.dataUrl)));
+        images = compressed;
+      } catch (e) {
+        console.error('image downscale failed', e);
+      }
+    }
+
     const batch = {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
@@ -1375,6 +1479,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
       accepted,
       notes: notes || null,
       source: 'quick',
+      images,
       actualPay: actualPay !== '' ? parseFloat(actualPay) : null,
       actualTip: null,
       actualMinutes: actualMinutes !== '' ? parseFloat(actualMinutes) : null,
@@ -1761,7 +1866,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
   );
 }
 
-function BatchList({ batches, onDelete, onReconcile }) {
+function BatchList({ batches, onDelete, onReconcile, onViewImages }) {
   const [filter, setFilter] = useState('all'); // 'all' | 'accepted' | 'declined'
 
   const filtered = useMemo(() => {
@@ -1796,7 +1901,7 @@ function BatchList({ batches, onDelete, onReconcile }) {
             Nothing here yet
           </div>
         ) : (
-          filtered.map(b => <BatchRow key={b.id} batch={b} onDelete={onDelete} onReconcile={onReconcile} />)
+          filtered.map(b => <BatchRow key={b.id} batch={b} onDelete={onDelete} onReconcile={onReconcile} onViewImages={onViewImages} />)
         )}
       </div>
     </div>
@@ -2045,6 +2150,7 @@ export default function App() {
   const [showLog, setShowLog] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
   const [reconcilingBatch, setReconcilingBatch] = useState(null);
+  const [viewingImagesBatch, setViewingImagesBatch] = useState(null);
   const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
 
   useEffect(() => {
@@ -2147,8 +2253,8 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === 'home' && <Dashboard batches={batches} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} syncStatus={syncStatus} />}
-            {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} />}
+            {view === 'home' && <Dashboard batches={batches} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} syncStatus={syncStatus} />}
+            {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} />}
             {view === 'insights' && <Insights batches={batches} />}
           </>
         )}
@@ -2165,6 +2271,13 @@ export default function App() {
           <BulkImportForm
             onSave={addBatchesBulk}
             onCancel={() => setShowBulk(false)}
+          />
+        )}
+
+        {viewingImagesBatch && (
+          <ImageViewer
+            batch={viewingImagesBatch}
+            onClose={() => setViewingImagesBatch(null)}
           />
         )}
 

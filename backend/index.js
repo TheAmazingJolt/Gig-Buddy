@@ -108,7 +108,7 @@ For TIMELINE timestamps on summary screens, look at the journey timeline (the ve
   "type": "shop_deliver" | "shop_only" | "delivery_only" | "mixed" | null,
   "pay": number — pay shown on the screen (offer total or summary total). If batch and tip are shown separately, sum them.,
   "tipAmount": number — tip portion if shown separately,
-  "miles": number — miles. For shop_only batches, this is the distance from acceptance to the store (no delivery leg).,
+  "miles": number — TOTAL miles for the entire batch. On a batch summary screen the journey timeline lists per-leg distances ("Distance: 0.2 miles" to the store, then "Distance: 10.9 miles" per delivery leg); SUM these into one total. For shop_only batches with no delivery legs, this is just the to-store distance.,
   "items": number — total item count summed across all orders,
   "units": number — unit count summed across all orders,
   "estMinutes": number — set ONLY on offer screens,
