@@ -99,6 +99,10 @@ For TIME fields:
   - "estMinutes": ONLY set when reading an OFFER screen (estimated time before acceptance). Convert "52 min" or "52 min 37 sec" to a single integer.
   - "actualMinutes": ONLY set when reading a SUMMARY screen — read from "Active hours" or the equivalent completion-time field. Convert "52 min 37 sec" to 53.
 
+For TIMELINE timestamps on summary screens, look at the journey timeline (the vertical list with location pins showing "Accepted: HH:MMam/pm Your location", "Arrival: HH:MMam/pm Store", "Drop off: HH:MMam/pm Order A", etc.):
+  - "acceptedAt": ISO 8601 datetime built from the "Accepted: HH:MMam/pm" entry combined with the date visible on the screen. The screen header usually shows "Sunday, April 26, 5:44pm" or similar — use that date. On a daily summary screen the day is in the title (e.g., "Sun, Apr 26") and applies to every batch in that summary. Null if no acceptance time is visible.
+  - "completedAt": ISO 8601 datetime built from the LAST "Drop off: HH:MMam/pm" entry combined with the date. For shop_only batches whose timeline ends at the store with no delivery legs, set null. Null if the batch hasn't completed.
+
 {
   "screenType": "offer" | "summary" | "item_detail" | "unknown",
   "type": "shop_deliver" | "shop_only" | "delivery_only" | "mixed" | null,
@@ -109,10 +113,12 @@ For TIME fields:
   "units": number — unit count summed across all orders,
   "estMinutes": number — set ONLY on offer screens,
   "actualMinutes": number — set ONLY on summary screens (from "Active hours"),
+  "acceptedAt": ISO 8601 datetime string — from journey "Accepted: HH:MMam/pm" + screen date,
+  "completedAt": ISO 8601 datetime string — from last "Drop off: HH:MMam/pm" + screen date, or null for shop-only,
   "store": string,
   "stops": number — physical destinations,
   "orders": number — customer/order count,
-  "notes": string — guaranteed earnings note, mixed-batch breakdown, accepted/arrival timestamps from a summary's journey
+  "notes": string — guaranteed earnings note, mixed-batch breakdown, anything else worth keeping
 }`;
 
 app.get('/', (req, res) => {
@@ -315,6 +321,8 @@ Return ONLY a valid JSON object — no markdown, no code fences, no prose:
       "units": number | null,
       "estMinutes": number | null,
       "actualMinutes": number | null,
+      "acceptedAt": string | null,    // ISO 8601, from journey "Accepted: HH:MMam/pm" + date
+      "completedAt": string | null,   // ISO 8601, from last "Drop off: HH:MMam/pm" + date
       "store": string | null,
       "stops": number,
       "orders": number,

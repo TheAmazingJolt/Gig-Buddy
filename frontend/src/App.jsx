@@ -16,7 +16,14 @@ function mergeBatchSets(local, remote) {
       map.set(b.id, b);
     }
   }
-  return Array.from(map.values()).sort((a, b) => (b.loggedAt || 0) - (a.loggedAt || 0));
+  return Array.from(map.values()).sort((a, b) => batchTime(b) - batchTime(a));
+}
+
+function parseTs(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return v > 0 ? v : null;
+  const ms = Date.parse(v);
+  return Number.isNaN(ms) ? null : ms;
 }
 
 const STORAGE_KEY = 'batches';
@@ -35,9 +42,15 @@ const fmt$ = (n) => n == null || isNaN(n) ? '—' : `$${n.toFixed(2)}`;
 const fmt$$ = (n) => n == null || isNaN(n) ? '—' : `$${n.toFixed(0)}`;
 const fmtRate = (n) => n == null || isNaN(n) ? '—' : `$${n.toFixed(2)}`;
 
+const wallClockMinutes = (b) => {
+  if (b.acceptedAt && b.completedAt) return (b.completedAt - b.acceptedAt) / 60000;
+  return null;
+};
+const bestMinutes = (b) => b.actualMinutes ?? wallClockMinutes(b) ?? b.estMinutes ?? null;
 const dollarsPerHour = (b) => {
-  if (!b.pay || !b.estMinutes) return null;
-  return b.pay / (b.estMinutes / 60);
+  const mins = bestMinutes(b);
+  if (!b.pay || !mins) return null;
+  return b.pay / (mins / 60);
 };
 const dollarsPerMile = (b) => {
   if (!b.pay || !b.miles) return null;
@@ -46,10 +59,12 @@ const dollarsPerMile = (b) => {
 const isReconciled = (b) => b.actualPay != null;
 const payDelta = (b) => isReconciled(b) ? b.actualPay - b.pay : null;
 const actualPerHour = (b) => {
-  const mins = b.actualMinutes || b.estMinutes;
+  const mins = b.actualMinutes ?? wallClockMinutes(b) ?? b.estMinutes;
   if (!b.actualPay || !mins) return null;
   return b.actualPay / (mins / 60);
 };
+// When a batch happened in the world, falling back to logged time when we don't know.
+const batchTime = (b) => b.acceptedAt || b.loggedAt || 0;
 
 const dayName = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday: 'short' });
 const hourOf = (ts) => new Date(ts).getHours();
@@ -403,7 +418,7 @@ function Header({ batches, syncStatus }) {
   const today = new Date();
   const todayStr = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-  const todayBatches = batches.filter(b => b.loggedAt >= startOfDay);
+  const todayBatches = batches.filter(b => batchTime(b) >= startOfDay);
   const todayAccepted = todayBatches.filter(b => b.accepted);
   const todayPay = todayAccepted.reduce((s, b) => s + (b.pay || 0), 0);
 
@@ -440,7 +455,7 @@ function MetricCard({ label, value, sub }) {
 function Dashboard({ batches, onLog, onReconcile, syncStatus }) {
   const stats = useMemo(() => {
     const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const weekBatches = batches.filter(b => b.loggedAt >= weekAgo);
+    const weekBatches = batches.filter(b => batchTime(b) >= weekAgo);
     const accepted = weekBatches.filter(b => b.accepted);
     const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
     const totalMin = accepted.reduce((s, b) => s + (b.estMinutes || 0), 0);
@@ -562,8 +577,15 @@ function BatchRow({ batch, onDelete, onReconcile }) {
                 {typeLabel}
               </span>
             )}
-            <span style={{ fontSize: 13, color: 'var(--muted)', marginLeft: 'auto' }}>
-              {fmtDate(batch.loggedAt)} · {fmtTime(batch.loggedAt)}
+            <span style={{ fontSize: 13, color: 'var(--muted)', marginLeft: 'auto', textAlign: 'right' }}>
+              {batch.acceptedAt ? (
+                <>
+                  {fmtDate(batch.acceptedAt)} · {fmtTime(batch.acceptedAt)}
+                  {batch.completedAt && <>{' – '}{fmtTime(batch.completedAt)}</>}
+                </>
+              ) : (
+                <>{fmtDate(batch.loggedAt)} · {fmtTime(batch.loggedAt)}</>
+              )}
             </span>
           </div>
           <div className="display" style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.2 }}>
@@ -875,6 +897,8 @@ function BulkImportForm({ onSave, onCancel }) {
     return {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
+      acceptedAt: parseTs(c.acceptedat ?? c.accepted_at),
+      completedAt: parseTs(c.completedat ?? c.completed_at),
       type: type || 'shop_deliver',
       pay: total,
       tipAmount: tipPart,
@@ -1156,6 +1180,8 @@ function LogForm({ onSave, onCancel, onBulk }) {
   const [storeOther, setStoreOther] = useState('');
   const [notes, setNotes] = useState('');
   const [type, setType] = useState('shop_deliver');
+  const [acceptedAt, setAcceptedAt] = useState(null);
+  const [completedAt, setCompletedAt] = useState(null);
   const [fromSummary, setFromSummary] = useState(false); // set by extraction when screenType === 'summary'
   const [mode, setMode] = useState(null); // null | 'paste' | 'shots'
   const [pasteText, setPasteText] = useState('');
@@ -1215,6 +1241,11 @@ function LogForm({ onSave, onCancel, onBulk }) {
 
     const orders_ = num(data.orders);
     if (orders_ != null) setOrders(String(Math.round(orders_)));
+
+    const accAt = parseTs(data.acceptedat ?? data.accepted_at);
+    if (accAt != null) setAcceptedAt(accAt);
+    const compAt = parseTs(data.completedat ?? data.completed_at);
+    if (compAt != null) setCompletedAt(compAt);
 
     const storeName = data.store;
     if (storeName) {
@@ -1329,6 +1360,8 @@ function LogForm({ onSave, onCancel, onBulk }) {
     const batch = {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
+      acceptedAt: acceptedAt,
+      completedAt: completedAt,
       type,
       pay: parseFloat(pay),
       tipAmount: tipAmount,
@@ -1804,7 +1837,7 @@ function Insights({ batches }) {
         byStore[b.store].accepted++;
         byStore[b.store].totalPay += b.pay || 0;
         byStore[b.store].totalMiles += b.miles || 0;
-        byStore[b.store].totalMin += b.estMinutes || 0;
+        byStore[b.store].totalMin += bestMinutes(b) || 0;
       }
     });
     const storeStats = Object.entries(byStore)
@@ -1840,10 +1873,10 @@ function Insights({ batches }) {
 
     const byDay = {};
     ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(d => byDay[d] = { totalPay: 0, totalMin: 0, count: 0 });
-    filtered.filter(b => b.accepted && b.estMinutes).forEach(b => {
-      const day = dayName(b.loggedAt);
+    filtered.filter(b => b.accepted && bestMinutes(b) != null).forEach(b => {
+      const day = dayName(batchTime(b));
       byDay[day].totalPay += b.pay || 0;
-      byDay[day].totalMin += b.estMinutes;
+      byDay[day].totalMin += bestMinutes(b);
       byDay[day].count++;
     });
     const dayStats = Object.entries(byDay).map(([day, s]) => ({
@@ -2017,7 +2050,9 @@ export default function App() {
   useEffect(() => {
     (async () => {
       // Local first, so the UI lights up instantly even on a slow network.
-      let local = (await loadBatches()).map(b => ({ ...b, updatedAt: b.updatedAt || b.loggedAt || 0 }));
+      const raw = await loadBatches();
+      let local = raw.map(b => ({ ...b, updatedAt: b.updatedAt || b.loggedAt || 0 }));
+      local = [...local].sort((a, b) => batchTime(b) - batchTime(a));
       setBatches(local);
       setLoaded(true);
 
@@ -2057,9 +2092,11 @@ export default function App() {
       .catch(e => { console.error('delete failed', e); setSyncStatus('error'); });
   };
 
+  const sortBatches = (arr) => [...arr].sort((a, b) => batchTime(b) - batchTime(a));
+
   const addBatch = async (b) => {
     const stamped = { ...b, updatedAt: Date.now() };
-    const next = [stamped, ...batches];
+    const next = sortBatches([stamped, ...batches]);
     setBatches(next);
     setShowLog(false);
     await saveBatches(next);
@@ -2072,7 +2109,7 @@ export default function App() {
       return;
     }
     const stamped = incoming.map(b => ({ ...b, updatedAt: Date.now() }));
-    const next = [...stamped, ...batches];
+    const next = sortBatches([...stamped, ...batches]);
     setBatches(next);
     setShowBulk(false);
     await saveBatches(next);
@@ -2086,7 +2123,7 @@ export default function App() {
 
   const updateBatch = async (updated) => {
     const stamped = { ...updated, updatedAt: Date.now() };
-    const next = batches.map(b => b.id === stamped.id ? stamped : b);
+    const next = sortBatches(batches.map(b => b.id === stamped.id ? stamped : b));
     setBatches(next);
     setReconcilingBatch(null);
     await saveBatches(next);
