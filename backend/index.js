@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
+import pg from 'pg';
 
 const app = express();
 app.use(cors());                          // allow calls from the artifact
@@ -9,6 +10,45 @@ app.use(express.json({ limit: '25mb' })); // images can be a few MB each base64'
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.MODEL || 'claude-haiku-4-5-20251001';
 // Swap to 'claude-sonnet-4-6' if Haiku ever misreads a screenshot.
+
+// Postgres — single-table, JSONB-blob model. Schema flexes as the batch shape evolves.
+const DATABASE_URL = process.env.DATABASE_URL;
+const pool = DATABASE_URL
+  ? new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } })
+  : null;
+
+async function initDb() {
+  if (!pool) {
+    console.warn('DATABASE_URL unset — /batches endpoints will return 503');
+    return;
+  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS batches (
+      id          TEXT PRIMARY KEY,
+      data        JSONB NOT NULL,
+      logged_at   BIGINT NOT NULL,
+      updated_at  BIGINT NOT NULL DEFAULT 0
+    )
+  `);
+  console.log('db schema ready');
+}
+
+// Auth — single shared bearer token, set as API_TOKEN on the server and VITE_API_TOKEN on the client.
+const API_TOKEN = process.env.API_TOKEN;
+function requireAuth(req, res, next) {
+  if (!API_TOKEN) {
+    return res.status(500).json({ error: 'API_TOKEN not configured on server' });
+  }
+  const header = req.header('authorization') || '';
+  const token = header.replace(/^Bearer\s+/i, '').trim();
+  if (token !== API_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+  next();
+}
+
+function requireDb(req, res, next) {
+  if (!pool) return res.status(503).json({ error: 'Database not configured (DATABASE_URL missing)' });
+  next();
+}
 
 const EXTRACT_PROMPT = `You will see one or more screenshots from the Instacart Shopper app — they may show an offer screen, a batch summary, an item detail panel, or other batch-related views. Combine information across all images to extract structured data.
 
@@ -54,7 +94,61 @@ The total number of "shop and deliver" / "shop only" / "delivery only" in the of
 }`;
 
 app.get('/', (req, res) => {
-  res.json({ ok: true, service: 'batch-extractor', model: MODEL });
+  res.json({
+    ok: true,
+    service: 'batch-extractor',
+    model: MODEL,
+    db: !!pool,
+    auth: !!API_TOKEN
+  });
+});
+
+// ── Batches CRUD ──────────────────────────────────────────────────
+// All /batches routes require Bearer auth and a configured DB.
+
+app.get('/batches', requireAuth, requireDb, async (req, res) => {
+  try {
+    const r = await pool.query('SELECT data FROM batches ORDER BY logged_at DESC');
+    res.json({ batches: r.rows.map(row => row.data) });
+  } catch (e) {
+    console.error('GET /batches:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/batches/:id', requireAuth, requireDb, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = req.body;
+    if (!data || typeof data !== 'object' || data.id !== id) {
+      return res.status(400).json({ error: 'Body must be the batch object with matching id' });
+    }
+    const loggedAt = Number(data.loggedAt) || Date.now();
+    const updatedAt = Number(data.updatedAt) || Date.now();
+    await pool.query(
+      `INSERT INTO batches (id, data, logged_at, updated_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE
+         SET data = EXCLUDED.data,
+             logged_at = EXCLUDED.logged_at,
+             updated_at = EXCLUDED.updated_at`,
+      [id, data, loggedAt, updatedAt]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('PUT /batches/:id:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/batches/:id', requireAuth, requireDb, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM batches WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('DELETE /batches/:id:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/extract', async (req, res) => {
@@ -112,4 +206,6 @@ app.post('/extract', async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`batch-extractor listening on :${port}`));
+initDb()
+  .catch(err => console.error('initDb failed; continuing without /batches:', err))
+  .finally(() => app.listen(port, () => console.log(`batch-extractor listening on :${port}`)));

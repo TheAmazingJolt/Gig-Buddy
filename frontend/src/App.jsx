@@ -1,10 +1,23 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Check, X, BarChart2, List, Home, Trash2,
-  Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera
+  Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff
 } from 'lucide-react';
+import { api } from './api';
 
 const EXTRACTOR_URL = import.meta.env.VITE_EXTRACTOR_URL;
+
+function mergeBatchSets(local, remote) {
+  const map = new Map();
+  for (const b of [...local, ...remote]) {
+    const stamp = b.updatedAt || b.loggedAt || 0;
+    const existing = map.get(b.id);
+    if (!existing || stamp > (existing.updatedAt || existing.loggedAt || 0)) {
+      map.set(b.id, b);
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => (b.loggedAt || 0) - (a.loggedAt || 0));
+}
 
 const STORAGE_KEY = 'batches';
 
@@ -362,7 +375,31 @@ const Theme = () => (
 // Components
 // ──────────────────────────────────────────────────────────
 
-function Header({ batches }) {
+function SyncIndicator({ status }) {
+  if (status === 'synced') return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)' }}>
+      <Cloud size={12} /> Synced
+    </span>
+  );
+  if (status === 'syncing') return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)' }}>
+      <Loader2 size={12} className="animate-spin" /> Syncing
+    </span>
+  );
+  if (status === 'error') return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--red)' }}>
+      <CloudOff size={12} /> Offline
+    </span>
+  );
+  // local-only: API not configured
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)' }}>
+      <CloudOff size={12} /> Local only
+    </span>
+  );
+}
+
+function Header({ batches, syncStatus }) {
   const today = new Date();
   const todayStr = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
@@ -372,7 +409,10 @@ function Header({ batches }) {
 
   return (
     <div className="px-5 pt-8 pb-4">
-      <div className="uppercase-label">{todayStr}</div>
+      <div className="flex items-center justify-between">
+        <div className="uppercase-label">{todayStr}</div>
+        <SyncIndicator status={syncStatus} />
+      </div>
       <div className="flex items-baseline gap-3 mt-1">
         <span className="display" style={{ fontSize: 44, fontWeight: 600, lineHeight: 1 }}>
           {fmt$$(todayPay)}
@@ -397,7 +437,7 @@ function MetricCard({ label, value, sub }) {
   );
 }
 
-function Dashboard({ batches, onLog, onReconcile }) {
+function Dashboard({ batches, onLog, onReconcile, syncStatus }) {
   const stats = useMemo(() => {
     const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const weekBatches = batches.filter(b => b.loggedAt >= weekAgo);
@@ -420,7 +460,7 @@ function Dashboard({ batches, onLog, onReconcile }) {
 
   return (
     <div>
-      <Header batches={batches} />
+      <Header batches={batches} syncStatus={syncStatus} />
 
       <div className="px-5">
         <div className="uppercase-label mb-2">Last 7 days</div>
@@ -1492,33 +1532,74 @@ export default function App() {
   const [view, setView] = useState('home'); // 'home' | 'list' | 'insights'
   const [showLog, setShowLog] = useState(false);
   const [reconcilingBatch, setReconcilingBatch] = useState(null);
+  const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
 
   useEffect(() => {
     (async () => {
-      const b = await loadBatches();
-      setBatches(b);
+      // Local first, so the UI lights up instantly even on a slow network.
+      let local = (await loadBatches()).map(b => ({ ...b, updatedAt: b.updatedAt || b.loggedAt || 0 }));
+      setBatches(local);
       setLoaded(true);
+
+      if (!api.enabled()) return;
+      try {
+        const remote = await api.list();
+        const merged = mergeBatchSets(local, remote);
+        setBatches(merged);
+        await saveBatches(merged);
+
+        // Push any local-only batches up to the server (one-time per missing id).
+        const remoteIds = new Set(remote.map(b => b.id));
+        const toPush = merged.filter(b => !remoteIds.has(b.id));
+        await Promise.all(toPush.map(b => api.upsert(b).catch(e => console.error('initial push', b.id, e))));
+
+        setSyncStatus('synced');
+      } catch (e) {
+        console.error('sync on load failed', e);
+        setSyncStatus('error');
+      }
     })();
   }, []);
 
+  const pushOne = (b) => {
+    if (!api.enabled()) return;
+    setSyncStatus('syncing');
+    api.upsert(b)
+      .then(() => setSyncStatus('synced'))
+      .catch(e => { console.error('push failed', e); setSyncStatus('error'); });
+  };
+
+  const removeOne = (id) => {
+    if (!api.enabled()) return;
+    setSyncStatus('syncing');
+    api.remove(id)
+      .then(() => setSyncStatus('synced'))
+      .catch(e => { console.error('delete failed', e); setSyncStatus('error'); });
+  };
+
   const addBatch = async (b) => {
-    const next = [b, ...batches];
+    const stamped = { ...b, updatedAt: Date.now() };
+    const next = [stamped, ...batches];
     setBatches(next);
     setShowLog(false);
     await saveBatches(next);
+    pushOne(stamped);
   };
 
   const updateBatch = async (updated) => {
-    const next = batches.map(b => b.id === updated.id ? updated : b);
+    const stamped = { ...updated, updatedAt: Date.now() };
+    const next = batches.map(b => b.id === stamped.id ? stamped : b);
     setBatches(next);
     setReconcilingBatch(null);
     await saveBatches(next);
+    pushOne(stamped);
   };
 
   const deleteBatch = async (id) => {
     const next = batches.filter(b => b.id !== id);
     setBatches(next);
     await saveBatches(next);
+    removeOne(id);
   };
 
   return (
@@ -1531,7 +1612,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === 'home' && <Dashboard batches={batches} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} />}
+            {view === 'home' && <Dashboard batches={batches} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} syncStatus={syncStatus} />}
             {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} />}
             {view === 'insights' && <Insights batches={batches} />}
           </>
