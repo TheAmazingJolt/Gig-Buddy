@@ -538,7 +538,8 @@ function BatchRow({ batch, onDelete, onReconcile }) {
   const typeLabel = {
     shop_deliver: 'Shop & deliver',
     shop_only: 'Shop only',
-    delivery_only: 'Delivery only'
+    delivery_only: 'Delivery only',
+    mixed: 'Mixed'
   }[batch.type] || null;
   const milesLabel = batch.type === 'shop_only'
     ? `${batch.miles}mi to store`
@@ -824,6 +825,8 @@ function LogForm({ onSave, onCancel }) {
         setType('shop_only');
       } else if (t === 'delivery_only' || t === 'deliveryonly' || t === 'do' || t === 'delivery' || t === 'last_mile') {
         setType('delivery_only');
+      } else if (t === 'mixed' || t === 'hybrid' || t === 'combo' || t === 'combined' || t === 'mix') {
+        setType('mixed');
       }
     }
   };
@@ -1096,7 +1099,8 @@ function LogForm({ onSave, onCancel }) {
               {[
                 { val: 'shop_deliver', label: 'Shop & deliver' },
                 { val: 'shop_only', label: 'Shop only' },
-                { val: 'delivery_only', label: 'Delivery only' }
+                { val: 'delivery_only', label: 'Delivery only' },
+                { val: 'mixed', label: 'Mixed' }
               ].map(t => (
                 <button
                   key={t.val}
@@ -1296,14 +1300,15 @@ const TYPE_FILTERS = [
   { val: 'all', label: 'All', short: 'All' },
   { val: 'shop_deliver', label: 'Shop & deliver', short: 'SAD' },
   { val: 'shop_only', label: 'Shop only', short: 'SO' },
-  { val: 'delivery_only', label: 'Delivery only', short: 'DO' }
+  { val: 'delivery_only', label: 'Delivery only', short: 'DO' },
+  { val: 'mixed', label: 'Mixed', short: 'Mix' }
 ];
 
 function Insights({ batches }) {
   const [typeFilter, setTypeFilter] = useState('all');
 
   const typeCounts = useMemo(() => {
-    const counts = { shop_deliver: 0, shop_only: 0, delivery_only: 0 };
+    const counts = { shop_deliver: 0, shop_only: 0, delivery_only: 0, mixed: 0 };
     batches.forEach(b => { if (b.type && counts[b.type] != null) counts[b.type]++; });
     return counts;
   }, [batches]);

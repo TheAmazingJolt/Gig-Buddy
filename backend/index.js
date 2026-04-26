@@ -73,24 +73,25 @@ If the logo color and shape don't match any of the above, do your best from any 
 
 For "type", use these cues in order of priority:
   1. Authoritative text on offer screens: "X shop and deliver" → shop_deliver, "X shop only" → shop_only, "X delivery only" → delivery_only.
-  2. Journey timeline on batch-summary screens (most reliable when offer text isn't present):
+  2. HYBRID batches: if the offer screen shows BOTH a "shop and deliver" line AND a "shop only" line (or any combination of two different categories) → set type to "mixed". Capture the breakdown in notes (e.g. "1 shop-and-deliver, 1 shop-only").
+  3. Journey timeline on batch-summary screens (most reliable when offer text isn't present):
      - "Your location → Store" with NO further legs to customer addresses → shop_only
      - "Your location → Store → Customer address(es)" → shop_deliver
      - "Your location → Pickup point → Customer address(es)" with no shopping leg at a retail store → delivery_only
-  3. Map pin pattern on offer screens: only a store pin and the user's location → likely shop_only; multiple home/destination pins around the store → likely shop_deliver.
-The total number of "shop and deliver" / "shop only" / "delivery only" in the offer text is also the "stops" count.
+  4. Map pin pattern on offer screens: only a store pin and the user's location → likely shop_only; multiple home/destination pins around the store → likely shop_deliver.
+The total number of "shop and deliver" / "shop only" / "delivery only" lines in the offer text summed together is the "stops" count.
 
 {
-  "type": "shop_deliver" | "shop_only" | "delivery_only" | null,
+  "type": "shop_deliver" | "shop_only" | "delivery_only" | "mixed" | null,
   "pay": number — total pay shown (batch + tip) in dollars. If batch and tip are shown separately, sum them.,
   "tipAmount": number — tip portion if shown separately,
   "miles": number — miles traveled or estimated. For shop_only batches, this is the distance from acceptance to the store (no delivery leg).,
-  "items": number — total item count (e.g. "42 items"),
-  "units": number — unit count if shown separately from items (e.g. "72 units"),
+  "items": number — total item count summed across all orders (e.g. "23 items" if breakdown is 2 + 21),
+  "units": number — unit count summed across all orders (e.g. "32 units" if breakdown is 5 + 27),
   "estMinutes": number — estimated or actual minutes (convert "52 min 37 sec" to 53),
   "store": string — primary store name (read from logo or text, e.g. "Aldi", "Publix"),
-  "stops": number — number of orders/customers (e.g. "2 shop and deliver" or "2 orders" = 2; default 1),
-  "notes": string — any salient detail worth remembering. Include "guaranteed earnings applied" if you see that badge, plus any timestamps or shop/deliver time splits.
+  "stops": number — total number of orders/customers across all categories (e.g. "1 shop and deliver" + "1 shop only" = 2; default 1),
+  "notes": string — any salient detail worth remembering. Include "guaranteed earnings applied" if you see that badge, the per-category breakdown for mixed batches, plus any timestamps or shop/deliver time splits.
 }`;
 
 app.get('/', (req, res) => {
