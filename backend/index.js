@@ -54,7 +54,7 @@ function requireDb(req, res, next) {
 // a non-empty array of numbers, overwrite miles with the actual sum.
 function reconcileMileage(obj) {
   if (!obj || typeof obj !== 'object') return obj;
-  const legs = obj.mileLegs ?? obj.mileLegs;
+  const legs = obj.mileLegs;
   if (Array.isArray(legs) && legs.length) {
     const nums = legs.map(Number).filter(n => Number.isFinite(n));
     if (nums.length) {
@@ -64,6 +64,23 @@ function reconcileMileage(obj) {
   }
   return obj;
 }
+
+// Derive completedAt when the timeline doesn't show a final drop (e.g.
+// shop_only batches end at the store, not a customer address). IC's
+// "Active hours" runs from acceptance to completion, so:
+//   completedAt = acceptedAt + actualMinutes
+function reconcileTimes(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (obj.completedAt) return obj;
+  if (!obj.acceptedAt || !obj.actualMinutes) return obj;
+  const start = Date.parse(obj.acceptedAt);
+  if (Number.isNaN(start)) return obj;
+  const endMs = start + Math.round(Number(obj.actualMinutes) * 60_000);
+  obj.completedAt = new Date(endMs).toISOString();
+  return obj;
+}
+
+const reconcileBatch = (obj) => reconcileTimes(reconcileMileage(obj));
 
 const EXTRACT_PROMPT = `You will see one or more screenshots from the Instacart Shopper app. Identify the screen type for each, then extract data accordingly.
 
@@ -242,7 +259,7 @@ app.post('/extract', async (req, res) => {
       return res.status(502).json({ error: 'JSON parse failed', raw: stripped.slice(first, last + 1).slice(0, 200) });
     }
 
-    reconcileMileage(parsed);
+    reconcileBatch(parsed);
     res.json({ ok: true, data: parsed, model: MODEL, imageCount: images.length });
   } catch (e) {
     console.error('Extract error:', e);
@@ -376,7 +393,7 @@ Return ONLY a valid JSON object — no markdown, no code fences, no prose:
       return res.status(502).json({ error: 'JSON parse failed', raw: stripped.slice(first, last + 1).slice(0, 200) });
     }
 
-    const batches = (Array.isArray(parsed?.batches) ? parsed.batches : []).map(reconcileMileage);
+    const batches = (Array.isArray(parsed?.batches) ? parsed.batches : []).map(reconcileBatch);
     res.json({
       ok: true,
       batches,
