@@ -9,6 +9,7 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
+      selfDestroying: true,
       manifest: {
         name: 'Gig Buddy',
         short_name: 'Gig Buddy',
