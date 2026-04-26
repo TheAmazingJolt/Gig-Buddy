@@ -1087,13 +1087,32 @@ function BatchList({ batches, onDelete }) {
   );
 }
 
-function Insights({ batches }) {
-  const insights = useMemo(() => {
-    if (batches.length < 3) return null;
+const TYPE_FILTERS = [
+  { val: 'all', label: 'All', short: 'All' },
+  { val: 'shop_deliver', label: 'Shop & deliver', short: 'SAD' },
+  { val: 'shop_only', label: 'Shop only', short: 'SO' },
+  { val: 'delivery_only', label: 'Delivery only', short: 'DO' }
+];
 
-    // By store
+function Insights({ batches }) {
+  const [typeFilter, setTypeFilter] = useState('all');
+
+  const typeCounts = useMemo(() => {
+    const counts = { shop_deliver: 0, shop_only: 0, delivery_only: 0 };
+    batches.forEach(b => { if (b.type && counts[b.type] != null) counts[b.type]++; });
+    return counts;
+  }, [batches]);
+
+  const filtered = useMemo(() => {
+    if (typeFilter === 'all') return batches;
+    return batches.filter(b => b.type === typeFilter);
+  }, [batches, typeFilter]);
+
+  const insights = useMemo(() => {
+    if (filtered.length < 3) return null;
+
     const byStore = {};
-    batches.forEach(b => {
+    filtered.forEach(b => {
       if (!b.store) return;
       if (!byStore[b.store]) byStore[b.store] = { offered: 0, accepted: 0, totalPay: 0, totalMiles: 0, totalMin: 0 };
       byStore[b.store].offered++;
@@ -1116,7 +1135,6 @@ function Insights({ batches }) {
       }))
       .sort((a, b) => (b.perHour || 0) - (a.perHour || 0));
 
-    // By pay bucket — accept rate
     const buckets = [
       { label: '< $10', min: 0, max: 10 },
       { label: '$10–15', min: 10, max: 15 },
@@ -1126,7 +1144,7 @@ function Insights({ batches }) {
       { label: '$30+', min: 30, max: Infinity }
     ];
     const bucketStats = buckets.map(b => {
-      const inBucket = batches.filter(x => x.pay >= b.min && x.pay < b.max);
+      const inBucket = filtered.filter(x => x.pay >= b.min && x.pay < b.max);
       const accepted = inBucket.filter(x => x.accepted).length;
       return {
         ...b,
@@ -1136,10 +1154,9 @@ function Insights({ batches }) {
       };
     }).filter(b => b.offered > 0);
 
-    // By day-of-week (accepted only, $/hr)
     const byDay = {};
     ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(d => byDay[d] = { totalPay: 0, totalMin: 0, count: 0 });
-    batches.filter(b => b.accepted && b.estMinutes).forEach(b => {
+    filtered.filter(b => b.accepted && b.estMinutes).forEach(b => {
       const day = dayName(b.loggedAt);
       byDay[day].totalPay += b.pay || 0;
       byDay[day].totalMin += b.estMinutes;
@@ -1152,17 +1169,64 @@ function Insights({ batches }) {
     }));
 
     return { storeStats, bucketStats, dayStats };
-  }, [batches]);
+  }, [filtered]);
+
+  const FilterChips = () => (
+    <div className="px-5 mb-4 flex gap-2 flex-wrap">
+      {TYPE_FILTERS.map(t => {
+        const count = t.val === 'all' ? batches.length : (typeCounts[t.val] || 0);
+        return (
+          <button
+            key={t.val}
+            onClick={() => setTypeFilter(t.val)}
+            className={`chip ${typeFilter === t.val ? 'chip-active' : ''}`}
+            style={{ opacity: count === 0 && t.val !== 'all' ? 0.5 : 1 }}
+          >
+            {t.short} <span style={{ opacity: 0.6, marginLeft: 4 }}>{count}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  const Header = () => (
+    <div className="px-5 pt-8 pb-4">
+      <div className="uppercase-label">Insights</div>
+      <div className="display mt-1" style={{ fontSize: 28, fontWeight: 600, lineHeight: 1.2 }}>
+        What the data says
+      </div>
+    </div>
+  );
+
+  if (batches.length === 0) {
+    return (
+      <div>
+        <Header />
+        <div className="px-5">
+          <div className="card p-8 text-center mt-4">
+            <TrendingUp size={28} style={{ color: 'var(--muted)', margin: '0 auto 12px' }} />
+            <div style={{ fontSize: 15, fontWeight: 500 }}>No batches yet</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>
+              Log a few to see patterns
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!insights) {
     return (
-      <div className="px-5 pt-8">
-        <div className="uppercase-label">Insights</div>
-        <div className="card p-8 text-center mt-4">
-          <TrendingUp size={28} style={{ color: 'var(--muted)', margin: '0 auto 12px' }} />
-          <div style={{ fontSize: 15, fontWeight: 500 }}>Not enough data yet</div>
-          <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>
-            Log a few more batches to see patterns
+      <div>
+        <Header />
+        <FilterChips />
+        <div className="px-5">
+          <div className="card p-8 text-center">
+            <TrendingUp size={28} style={{ color: 'var(--muted)', margin: '0 auto 12px' }} />
+            <div style={{ fontSize: 15, fontWeight: 500 }}>Not enough data yet</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>
+              Need at least 3 batches{typeFilter !== 'all' ? ` of type ${TYPE_FILTERS.find(t => t.val === typeFilter)?.label}` : ''} to see patterns
+            </div>
           </div>
         </div>
       </div>
@@ -1171,15 +1235,20 @@ function Insights({ batches }) {
 
   const maxPerHour = Math.max(...insights.storeStats.map(s => s.perHour || 0), 0.01);
   const maxDay = Math.max(...insights.dayStats.map(d => d.perHour || 0), 0.01);
+  const showPerMile = typeFilter !== 'shop_only'; // $/mi is misleading for shop_only
 
   return (
     <div>
-      <div className="px-5 pt-8 pb-4">
-        <div className="uppercase-label">Insights</div>
-        <div className="display mt-1" style={{ fontSize: 28, fontWeight: 600, lineHeight: 1.2 }}>
-          What the data says
+      <Header />
+      <FilterChips />
+
+      {typeFilter === 'all' && (
+        <div className="px-5 mb-4">
+          <div className="card p-3" style={{ background: 'var(--accent-soft)', borderColor: 'transparent', fontSize: 12, color: 'var(--ink-soft)' }}>
+            Mixed types: $/hr and $/mile averages combine shop, deliver, and shop-only batches. Pick a single type above for comparable stats.
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="px-5 mb-6">
         <div className="uppercase-label mb-3">$/hr by store</div>
