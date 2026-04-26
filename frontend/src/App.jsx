@@ -3,7 +3,7 @@ import {
   Plus, Check, X, BarChart2, List, Home, Trash2,
   Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff
 } from 'lucide-react';
-import { api } from './api';
+import { api, extractMulti } from './api';
 
 const EXTRACTOR_URL = import.meta.env.VITE_EXTRACTOR_URL;
 
@@ -756,7 +756,336 @@ function ReconcileForm({ batch, onSave, onCancel }) {
   );
 }
 
-function LogForm({ onSave, onCancel }) {
+function BulkImportForm({ onSave, onCancel }) {
+  const [shots, setShots] = useState([]); // [{ name, dataUrl, base64, mediaType, takenAt }]
+  const [phase, setPhase] = useState('upload'); // 'upload' | 'extracting' | 'review'
+  const [error, setError] = useState(null);
+  const [candidates, setCandidates] = useState([]); // [{ ...batch, imageIndices, _accepted, _kept }]
+
+  const TYPE_LABELS = {
+    shop_deliver: 'Shop & deliver',
+    shop_only: 'Shop only',
+    delivery_only: 'Delivery only',
+    mixed: 'Mixed'
+  };
+
+  const handleFiles = async (e) => {
+    const incoming = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!incoming.length) return;
+    const room = 20 - shots.length;
+    const files = incoming.slice(0, room);
+
+    const next = await Promise.all(files.map(file => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result);
+        const comma = dataUrl.indexOf(',');
+        const meta = dataUrl.slice(5, comma);
+        const mediaType = meta.split(';')[0] || file.type || 'image/jpeg';
+        const base64 = dataUrl.slice(comma + 1);
+        const takenAt = file.lastModified ? new Date(file.lastModified).toISOString() : new Date().toISOString();
+        resolve({ name: file.name, dataUrl, base64, mediaType, takenAt });
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    })));
+
+    // Sort by capture time so the order in thumbnails matches the order sent to the model
+    setShots(prev => [...prev, ...next].slice(0, 20).sort((a, b) => new Date(a.takenAt) - new Date(b.takenAt)));
+  };
+
+  const removeShot = (idx) => setShots(prev => prev.filter((_, i) => i !== idx));
+
+  const handleExtract = async () => {
+    if (!shots.length) return;
+    setError(null);
+    setPhase('extracting');
+    try {
+      const batches = await extractMulti(shots.map(s => ({
+        data: s.base64,
+        mediaType: s.mediaType,
+        takenAt: s.takenAt
+      })));
+      const lowered = batches.map(b => {
+        const out = {};
+        for (const k of Object.keys(b || {})) out[k.toLowerCase()] = b[k];
+        return out;
+      });
+      const prepared = lowered.map((b, i) => ({
+        ...b,
+        _accepted: true,
+        _kept: true,
+        _idx: i
+      }));
+      setCandidates(prepared);
+      setPhase('review');
+    } catch (err) {
+      setError(err.message || 'Extraction failed');
+      setPhase('upload');
+    }
+  };
+
+  const toggleAccept = (idx) => {
+    setCandidates(prev => prev.map(c => c._idx === idx ? { ...c, _accepted: !c._accepted } : c));
+  };
+
+  const discard = (idx) => {
+    setCandidates(prev => prev.map(c => c._idx === idx ? { ...c, _kept: false } : c));
+  };
+
+  const restore = (idx) => {
+    setCandidates(prev => prev.map(c => c._idx === idx ? { ...c, _kept: true } : c));
+  };
+
+  const num = (v) => {
+    if (v == null || v === '') return null;
+    const n = parseFloat(String(v));
+    return isNaN(n) ? null : n;
+  };
+
+  const candidateToBatch = (c) => {
+    const screenType = String(c.screentype || c.screen_type || '').toLowerCase();
+    const total = num(c.pay ?? c.total);
+    const tipPart = num(c.tip ?? c.tipamount);
+    const estMins = num(c.estminutes ?? c.estminute);
+    const actualMins = num(c.actualminutes ?? c.activeminutes);
+    const miles = num(c.miles ?? c.mi ?? c.distance);
+    const items = num(c.items);
+    const units = num(c.units);
+    const stops = num(c.stops);
+    const orders = num(c.orders);
+    const t = String(c.type || '').toLowerCase().replace(/[\s\-&]+/g, '_');
+    let type = null;
+    if (t === 'shop_deliver' || t === 'shop_and_deliver') type = 'shop_deliver';
+    else if (t === 'shop_only') type = 'shop_only';
+    else if (t === 'delivery_only') type = 'delivery_only';
+    else if (t === 'mixed' || t === 'hybrid') type = 'mixed';
+
+    const fromSummary = screenType === 'summary';
+    const hasActual = actualMins != null || (fromSummary && total != null);
+
+    return {
+      id: crypto.randomUUID(),
+      loggedAt: Date.now(),
+      type: type || 'shop_deliver',
+      pay: total,
+      tipAmount: tipPart,
+      miles: miles,
+      estMinutes: estMins != null ? Math.round(estMins) : null,
+      items: items != null ? Math.round(items) : null,
+      units: units != null ? Math.round(units) : null,
+      stops: stops != null ? Math.round(stops) : 1,
+      orders: orders != null ? Math.round(orders) : 1,
+      store: c.store || null,
+      accepted: c._accepted,
+      notes: c.notes || null,
+      source: 'bulk',
+      actualPay: fromSummary && total != null ? total : null,
+      actualTip: null,
+      actualMinutes: actualMins != null ? Math.round(actualMins) : null,
+      reconciledAt: hasActual ? Date.now() : null
+    };
+  };
+
+  const saveAll = () => {
+    const kept = candidates.filter(c => c._kept).map(candidateToBatch);
+    onSave(kept);
+  };
+
+  const keptCount = candidates.filter(c => c._kept).length;
+
+  return (
+    <div className="modal">
+      <div className="px-5 pt-6 pb-4 flex items-center justify-between" style={{ background: 'var(--bg)' }}>
+        <button onClick={onCancel} className="btn-ghost" style={{ padding: '8px 14px', fontSize: 14 }}>
+          <ArrowLeft size={16} style={{ display: 'inline', marginRight: 4 }} /> Cancel
+        </button>
+        <div className="display" style={{ fontSize: 22, fontWeight: 600 }}>Bulk import</div>
+        <div style={{ width: 80 }} />
+      </div>
+
+      <div className="px-5">
+        {phase === 'upload' && (
+          <>
+            <div className="card-strong p-3">
+              <div className="flex items-baseline justify-between mb-2">
+                <div className="uppercase-label">Screenshots</div>
+                <div className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>{shots.length}/20</div>
+              </div>
+
+              <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>
+                Add screenshots from one or more batches. The backend uses each image's capture time + content (store, items, pay) to group them into batches automatically.
+              </div>
+
+              {shots.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 6, marginBottom: 8 }}>
+                  {shots.map((s, i) => (
+                    <div key={i} style={{ position: 'relative', flex: '0 0 auto' }}>
+                      <img
+                        src={s.dataUrl}
+                        alt={`shot ${i + 1}`}
+                        style={{ height: 88, width: 'auto', borderRadius: 8, border: '1px solid var(--border)', display: 'block' }}
+                      />
+                      <button
+                        onClick={() => removeShot(i)}
+                        aria-label="Remove"
+                        style={{
+                          position: 'absolute', top: -6, right: -6, width: 22, height: 22,
+                          borderRadius: 11, border: 'none', background: 'var(--ink)', color: 'var(--surface)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0
+                        }}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {shots.length < 20 && (
+                <label
+                  className="btn-ghost"
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px', fontSize: 13, cursor: 'pointer' }}
+                >
+                  <Camera size={14} />
+                  {shots.length === 0 ? 'Choose images (1–20)' : 'Add more'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleFiles}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+              )}
+
+              <button
+                onClick={handleExtract}
+                className="btn-primary mt-3"
+                disabled={!shots.length}
+                style={{ opacity: shots.length ? 1 : 0.4 }}
+              >
+                Extract all
+              </button>
+
+              {error && (
+                <div className="mt-2 p-2" style={{ background: 'var(--red-soft)', borderRadius: 6, fontSize: 12, color: 'var(--red)' }}>
+                  {error}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {phase === 'extracting' && (
+          <div className="card p-8 text-center">
+            <Loader2 size={28} className="animate-spin" style={{ color: 'var(--muted)', margin: '0 auto 12px' }} />
+            <div style={{ fontSize: 15, fontWeight: 500 }}>Extracting…</div>
+            <div className="mono mt-1" style={{ fontSize: 12, color: 'var(--muted)' }}>
+              Grouping {shots.length} images into batches
+            </div>
+          </div>
+        )}
+
+        {phase === 'review' && (
+          <>
+            <div className="uppercase-label mb-3">{candidates.length} batch{candidates.length === 1 ? '' : 'es'} found</div>
+            <div className="space-y-3 mb-6">
+              {candidates.map(c => {
+                const sources = (c.imageindices || []).map(i => shots[i - 1]).filter(Boolean);
+                return (
+                  <div
+                    key={c._idx}
+                    className="card p-4"
+                    style={{ opacity: c._kept ? 1 : 0.4 }}
+                  >
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <span className={`pill ${c._accepted ? 'pill-accept' : 'pill-decline'}`}>
+                        {c._accepted ? 'ACCEPTED' : 'DECLINED'}
+                      </span>
+                      {c.type && (
+                        <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'IBM Plex Mono, monospace', letterSpacing: '0.04em' }}>
+                          {TYPE_LABELS[String(c.type).toLowerCase()] || c.type}
+                        </span>
+                      )}
+                      {c.screentype && (
+                        <span style={{ fontSize: 11, color: 'var(--muted)' }}>· {c.screentype}</span>
+                      )}
+                    </div>
+                    <div className="display" style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.2 }}>
+                      {c.pay != null ? fmt$(c.pay) : '—'} <span style={{ color: 'var(--muted)', fontSize: 15, fontWeight: 400 }}>· {c.store || '—'}</span>
+                    </div>
+                    <div className="mono mt-1" style={{ fontSize: 12, color: 'var(--muted)' }}>
+                      {c.miles != null && <>{c.miles}mi</>}
+                      {c.actualminutes != null && <> · {c.actualminutes}min actual</>}
+                      {c.actualminutes == null && c.estminutes != null && <> · {c.estminutes}min est</>}
+                      {c.items != null && <> · {c.items}i</>}
+                      {c.units != null && <>/{c.units}u</>}
+                      {c.stops != null && c.stops > 1 && <> · {c.stops} stops</>}
+                      {c.orders != null && c.orders > 1 && <> · {c.orders} orders</>}
+                    </div>
+                    {sources.length > 0 && (
+                      <div style={{ display: 'flex', gap: 6, overflowX: 'auto', marginTop: 10 }}>
+                        {sources.map((s, i) => (
+                          <img
+                            key={i}
+                            src={s.dataUrl}
+                            alt=""
+                            style={{ height: 48, width: 'auto', borderRadius: 4, border: '1px solid var(--border-soft)' }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex gap-2 mt-3">
+                      {c._kept && (
+                        <>
+                          <button
+                            onClick={() => toggleAccept(c._idx)}
+                            className="btn-ghost"
+                            style={{ flex: 1, padding: '8px', fontSize: 12 }}
+                          >
+                            Mark {c._accepted ? 'declined' : 'accepted'}
+                          </button>
+                          <button
+                            onClick={() => discard(c._idx)}
+                            className="btn-ghost"
+                            style={{ padding: '8px 14px', fontSize: 12, color: 'var(--red)', borderColor: 'var(--red-soft)' }}
+                          >
+                            Discard
+                          </button>
+                        </>
+                      )}
+                      {!c._kept && (
+                        <button
+                          onClick={() => restore(c._idx)}
+                          className="btn-ghost"
+                          style={{ flex: 1, padding: '8px', fontSize: 12 }}
+                        >
+                          Restore
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              onClick={saveAll}
+              className="btn-primary mb-8"
+              disabled={!keptCount}
+              style={{ opacity: keptCount ? 1 : 0.4 }}
+            >
+              Save {keptCount} batch{keptCount === 1 ? '' : 'es'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LogForm({ onSave, onCancel, onBulk }) {
   const [pay, setPay] = useState('');
   const [tipAmount, setTipAmount] = useState(null); // hidden, only set by extraction
   const [miles, setMiles] = useState('');
@@ -978,24 +1307,36 @@ function LogForm({ onSave, onCancel }) {
       <div className="px-5">
         <div className="mb-4">
           {mode === null && (
-            <div className="flex gap-2">
-              <button
-                onClick={() => { setMode('shots'); setExtractError(null); }}
-                className="btn-ghost"
-                style={{ flex: 1, padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
-              >
-                <Camera size={14} />
-                Screenshots
-              </button>
-              <button
-                onClick={() => { setMode('paste'); setPasteError(null); }}
-                className="btn-ghost"
-                style={{ flex: 1, padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
-              >
-                <ClipboardPaste size={14} />
-                Paste data
-              </button>
-            </div>
+            <>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { setMode('shots'); setExtractError(null); }}
+                  className="btn-ghost"
+                  style={{ flex: 1, padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                >
+                  <Camera size={14} />
+                  Screenshots
+                </button>
+                <button
+                  onClick={() => { setMode('paste'); setPasteError(null); }}
+                  className="btn-ghost"
+                  style={{ flex: 1, padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                >
+                  <ClipboardPaste size={14} />
+                  Paste data
+                </button>
+              </div>
+              {onBulk && (
+                <button
+                  onClick={onBulk}
+                  className="btn-ghost mt-2"
+                  style={{ width: '100%', padding: '10px', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                >
+                  <Camera size={13} />
+                  Bulk import (multiple batches)
+                </button>
+              )}
+            </>
           )}
 
           {mode === 'paste' && (
@@ -1611,6 +1952,7 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState('home'); // 'home' | 'list' | 'insights'
   const [showLog, setShowLog] = useState(false);
+  const [showBulk, setShowBulk] = useState(false);
   const [reconcilingBatch, setReconcilingBatch] = useState(null);
   const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
 
@@ -1666,6 +2008,24 @@ export default function App() {
     pushOne(stamped);
   };
 
+  const addBatchesBulk = async (incoming) => {
+    if (!incoming.length) {
+      setShowBulk(false);
+      return;
+    }
+    const stamped = incoming.map(b => ({ ...b, updatedAt: Date.now() }));
+    const next = [...stamped, ...batches];
+    setBatches(next);
+    setShowBulk(false);
+    await saveBatches(next);
+    if (api.enabled()) {
+      setSyncStatus('syncing');
+      Promise.all(stamped.map(b => api.upsert(b)))
+        .then(() => setSyncStatus('synced'))
+        .catch(e => { console.error('bulk push failed', e); setSyncStatus('error'); });
+    }
+  };
+
   const updateBatch = async (updated) => {
     const stamped = { ...updated, updatedAt: Date.now() };
     const next = batches.map(b => b.id === stamped.id ? stamped : b);
@@ -1699,7 +2059,18 @@ export default function App() {
         )}
 
         {showLog && (
-          <LogForm onSave={addBatch} onCancel={() => setShowLog(false)} />
+          <LogForm
+            onSave={addBatch}
+            onCancel={() => setShowLog(false)}
+            onBulk={() => { setShowLog(false); setShowBulk(true); }}
+          />
+        )}
+
+        {showBulk && (
+          <BulkImportForm
+            onSave={addBatchesBulk}
+            onCancel={() => setShowBulk(false)}
+          />
         )}
 
         {reconcilingBatch && (

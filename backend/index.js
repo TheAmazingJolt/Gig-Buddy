@@ -227,6 +227,116 @@ app.post('/extract', async (req, res) => {
   }
 });
 
+// ── Bulk extraction with timestamp-aware grouping ───────────────────
+// POST /extract-multi
+// body: { images: [{ data, mediaType, takenAt: ISOString }] }
+// returns: { ok: true, batches: [{ ...fields, imageIndices: [1,2,...] }] }
+
+app.post('/extract-multi', async (req, res) => {
+  try {
+    const { images } = req.body;
+    if (!Array.isArray(images) || images.length === 0) {
+      return res.status(400).json({ error: 'images: [{data, mediaType, takenAt}, ...] required' });
+    }
+    if (images.length > 20) {
+      return res.status(400).json({ error: 'max 20 images per multi-extract request' });
+    }
+
+    const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    const content = [];
+    const tsLines = [];
+    for (const [i, img] of images.entries()) {
+      if (!img?.data || !img?.mediaType) {
+        return res.status(400).json({ error: `image ${i}: missing data or mediaType` });
+      }
+      if (!validTypes.includes(img.mediaType)) {
+        return res.status(400).json({ error: `image ${i}: unsupported mediaType ${img.mediaType}` });
+      }
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: img.mediaType, data: img.data }
+      });
+      const ts = img.takenAt || 'unknown';
+      tsLines.push(`Image ${i + 1}: ${ts}`);
+    }
+
+    const multiPrompt = `You will see ${images.length} screenshot(s) from the Instacart Shopper app. They may represent ONE batch or SEVERAL batches. Your job is to GROUP images that belong to the same batch, then extract structured data per group.
+
+Each image has a "taken at" timestamp:
+${tsLines.join('\n')}
+
+Grouping rules — combine BOTH cues:
+- Time: images taken within ~15 minutes of each other are LIKELY the same batch. Images separated by hours are LIKELY different batches.
+- Content: the SAME batch will share the same store, the same items count, the same approximate pay, and screen progression makes sense (offer → items list → summary). DIFFERENT batches have distinct stores, mismatched item counts, or contradictory data (e.g. two different "Active hours" times).
+
+When time and content disagree, content wins for grouping decisions, but lean toward "same batch" if BOTH are within reasonable bounds.
+
+For each batch, extract using ALL the rules below.
+
+${EXTRACT_PROMPT.split('Return ONLY')[1].split('{')[0]}
+
+Each batch object has these fields PLUS an "imageIndices" field — a 1-indexed array listing which images belong to that batch.
+
+Return ONLY a valid JSON object with key "batches" — no markdown, no code fences, no prose. Example:
+
+{
+  "batches": [
+    {
+      "screenType": "summary",
+      "type": "shop_only",
+      "pay": 19.61,
+      "tipAmount": 0,
+      "miles": 5.3,
+      "items": 49,
+      "units": 69,
+      "estMinutes": null,
+      "actualMinutes": 53,
+      "store": "Publix",
+      "stops": 1,
+      "orders": 2,
+      "notes": "Active hours 52 min 37 sec",
+      "imageIndices": [1, 2]
+    },
+    {
+      "screenType": "offer",
+      "type": "shop_deliver",
+      ...
+      "imageIndices": [3, 4]
+    }
+  ]
+}`;
+
+    content.push({ type: 'text', text: multiPrompt });
+
+    const message = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      messages: [{ role: 'user', content }]
+    });
+
+    const text = message.content.map(c => c.text || '').join('');
+    const stripped = text.replace(/```json|```/g, '');
+    const first = stripped.indexOf('{');
+    const last = stripped.lastIndexOf('}');
+    if (first < 0 || last <= first) {
+      return res.status(502).json({ error: 'No JSON in model response', raw: text.slice(0, 200) });
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(stripped.slice(first, last + 1));
+    } catch {
+      return res.status(502).json({ error: 'JSON parse failed', raw: stripped.slice(first, last + 1).slice(0, 200) });
+    }
+
+    const batches = Array.isArray(parsed?.batches) ? parsed.batches : [];
+    res.json({ ok: true, batches, model: MODEL, imageCount: images.length });
+  } catch (e) {
+    console.error('Extract-multi error:', e);
+    res.status(500).json({ error: e.message || 'extraction failed' });
+  }
+});
+
 const port = process.env.PORT || 3000;
 initDb()
   .catch(err => console.error('initDb failed; continuing without /batches:', err))

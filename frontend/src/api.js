@@ -40,3 +40,18 @@ export const api = {
     return authedFetch(`/batches/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 };
+
+// Extraction endpoints are not auth-gated, but they live on the same backend.
+export async function extractMulti(images) {
+  if (!BASE) throw new Error('VITE_EXTRACTOR_URL is not set');
+  const res = await fetch(BASE + '/extract-multi', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ images })
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) {
+    throw new Error(json.error || `Extraction failed (HTTP ${res.status})`);
+  }
+  return Array.isArray(json.batches) ? json.batches : [];
+}
