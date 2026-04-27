@@ -11,9 +11,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       selfDestroying: true,
       manifest: {
-        name: 'Gig Buddy',
-        short_name: 'Gig Buddy',
-        description: 'Instacart batch tracker',
+        name: 'Batchwise',
+        short_name: 'Batchwise',
+        description: 'Instacart batch tracker — real $/hr, real $/mile, real decline data.',
         theme_color: '#b8401f',
         background_color: '#efe7d6',
         display: 'standalone',
