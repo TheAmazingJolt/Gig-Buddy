@@ -26,6 +26,16 @@ function parseTs(v) {
   return Number.isNaN(ms) ? null : ms;
 }
 
+// One-time backfill for batches saved before the backend started deriving
+// completedAt for shop_only and other no-final-leg batches.
+// Returns [maybeUpdatedBatch, didChange].
+function backfillBatch(b) {
+  if (b.completedAt) return [b, false];
+  if (!b.acceptedAt || !b.actualMinutes) return [b, false];
+  const completedAt = b.acceptedAt + Math.round(b.actualMinutes * 60_000);
+  return [{ ...b, completedAt }, true];
+}
+
 // Downscale + JPEG-encode a dataUrl so we can keep batch screenshots inline
 // without bloating storage. Targets ~30-80KB per image at quality 0.7.
 async function downscaleImage(dataUrl, maxW = 800, maxH = 1600, quality = 0.72) {
@@ -2158,14 +2168,39 @@ export default function App() {
       // Local first, so the UI lights up instantly even on a slow network.
       const raw = await loadBatches();
       let local = raw.map(b => ({ ...b, updatedAt: b.updatedAt || b.loggedAt || 0 }));
+
+      // Local-side backfill so we get the fix immediately even before sync.
+      let localFixedCount = 0;
+      local = local.map(b => {
+        const [next, changed] = backfillBatch(b);
+        if (changed) localFixedCount++;
+        return changed ? { ...next, updatedAt: Date.now() } : b;
+      });
+
       local = [...local].sort((a, b) => batchTime(b) - batchTime(a));
       setBatches(local);
       setLoaded(true);
 
+      if (localFixedCount && !api.enabled()) {
+        await saveBatches(local);
+      }
+
       if (!api.enabled()) return;
       try {
         const remote = await api.list();
-        const merged = mergeBatchSets(local, remote);
+        let merged = mergeBatchSets(local, remote);
+
+        // One-time client-side backfill of completedAt for any batches that
+        // pre-date the backend's reconcileTimes pass. Captures everything
+        // pulled from the server too, then pushes the fixes back up so other
+        // devices stay consistent.
+        const fixed = [];
+        merged = merged.map(b => {
+          const [next, changed] = backfillBatch(b);
+          if (changed) fixed.push({ ...next, updatedAt: Date.now() });
+          return changed ? { ...next, updatedAt: Date.now() } : b;
+        });
+
         setBatches(merged);
         await saveBatches(merged);
 
@@ -2173,6 +2208,11 @@ export default function App() {
         const remoteIds = new Set(remote.map(b => b.id));
         const toPush = merged.filter(b => !remoteIds.has(b.id));
         await Promise.all(toPush.map(b => api.upsert(b).catch(e => console.error('initial push', b.id, e))));
+
+        // Push any backfill fixes up to the server too.
+        if (fixed.length) {
+          await Promise.all(fixed.map(b => api.upsert(b).catch(e => console.error('backfill push', b.id, e))));
+        }
 
         setSyncStatus('synced');
       } catch (e) {
