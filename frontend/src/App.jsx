@@ -171,66 +171,97 @@ function parsePaste(text) {
 
 const Theme = () => (
   <style>{`
-    @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
     :root {
-      --bg: #efe7d6;
-      --surface: #faf5e8;
-      --surface-2: #f5ecd9;
-      --ink: #1a1612;
-      --ink-soft: #3a3128;
-      --muted: #7d6b52;
-      --muted-soft: #a89a82;
+      /* Surfaces */
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+
+      /* Ink */
+      --ink: #0f172a;
+      --ink-soft: #334155;
+      --muted: #64748b;
+      --muted-soft: #94a3b8;
+
+      /* Brand */
       --accent: #b8401f;
       --accent-soft: #fde2c4;
-      --green: #3f6212;
-      --green-soft: #d9e8b8;
-      --red: #991b1b;
-      --red-soft: #fcd7d7;
-      --border: #d4c8b0;
-      --border-soft: #e6dcc4;
+
+      /* Status */
+      --green: #10b981;
+      --green-soft: #d1fae5;
+      --red: #ef4444;
+      --red-soft: #fee2e2;
+
+      /* Lines */
+      --border: #e2e8f0;
+      --border-soft: #f1f5f9;
+
+      /* Elevation */
+      --shadow-card: 0 1px 3px rgba(15,23,42,0.04), 0 1px 2px rgba(15,23,42,0.06);
+      --shadow-card-strong: 0 4px 16px rgba(15,23,42,0.06), 0 1px 3px rgba(15,23,42,0.05);
+      --shadow-fab: 0 6px 20px rgba(184,64,31,0.32);
+
+      /* Type colors — for BatchRow left borders + tinted pills */
+      --type-shop-deliver: #b8401f;
+      --type-shop-deliver-soft: #fde2c4;
+      --type-shop-only: #3b82f6;
+      --type-shop-only-soft: #dbeafe;
+      --type-delivery-only: #8b5cf6;
+      --type-delivery-only-soft: #ede9fe;
+      --type-mixed: #f59e0b;
+      --type-mixed-soft: #fef3c7;
     }
 
     * { -webkit-tap-highlight-color: transparent; }
     body { margin: 0; }
 
     .app {
-      font-family: 'IBM Plex Sans', system-ui, sans-serif;
+      font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
       background: var(--bg);
       color: var(--ink);
       min-height: 100vh;
       padding-bottom: 80px;
+      -webkit-font-smoothing: antialiased;
     }
 
     .display {
-      font-family: 'Fraunces', Georgia, serif;
-      font-feature-settings: 'ss01' on;
+      font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+      font-weight: 700;
       letter-spacing: -0.02em;
     }
-    .mono { font-family: 'IBM Plex Mono', monospace; }
+    .mono {
+      font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+      font-variant-numeric: tabular-nums;
+    }
     .uppercase-label {
-      font-family: 'IBM Plex Mono', monospace;
+      font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
       font-size: 11px;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--muted);
-      font-weight: 500;
+      font-weight: 600;
     }
 
     .card {
       background: var(--surface);
-      border: 1px solid var(--border-soft);
-      border-radius: 14px;
+      border: 1px solid transparent;
+      border-radius: 16px;
+      box-shadow: var(--shadow-card);
     }
     .card-strong {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 14px;
+      border-radius: 16px;
+      box-shadow: var(--shadow-card);
     }
     .card-ink {
       background: var(--ink);
       color: var(--surface);
-      border-radius: 14px;
+      border-radius: 16px;
+      box-shadow: var(--shadow-card-strong);
     }
 
     .chip {
@@ -242,7 +273,7 @@ const Theme = () => (
       background: var(--surface);
       color: var(--ink-soft);
       font-size: 14px;
-      font-weight: 500;
+      font-weight: 600;
       cursor: pointer;
       transition: all 0.12s;
     }
@@ -257,63 +288,71 @@ const Theme = () => (
       background: var(--ink);
       color: var(--surface);
       border: none;
-      padding: 16px 20px;
-      border-radius: 12px;
-      font-size: 16px;
-      font-weight: 600;
+      padding: 14px 22px;
+      border-radius: 999px;
+      font-size: 15px;
+      font-weight: 700;
       width: 100%;
       cursor: pointer;
       font-family: inherit;
+      transition: transform 0.1s ease;
     }
     .btn-primary:active { transform: scale(0.98); }
     .btn-primary:disabled { opacity: 0.4; }
 
     .btn-ghost {
-      background: transparent;
+      background: var(--surface);
       color: var(--ink-soft);
       border: 1px solid var(--border);
-      padding: 14px 20px;
-      border-radius: 12px;
-      font-size: 15px;
-      font-weight: 500;
+      padding: 12px 20px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
       cursor: pointer;
       font-family: inherit;
+      transition: transform 0.1s ease;
     }
+    .btn-ghost:active { transform: scale(0.98); }
 
     .btn-accept {
       background: var(--green);
-      color: var(--surface);
+      color: #ffffff;
       border: none;
-      padding: 18px;
-      border-radius: 12px;
-      font-size: 17px;
-      font-weight: 600;
+      padding: 16px 22px;
+      border-radius: 999px;
+      font-size: 16px;
+      font-weight: 700;
       flex: 1;
       cursor: pointer;
       font-family: inherit;
+      transition: transform 0.1s ease;
     }
+    .btn-accept:active { transform: scale(0.98); }
     .btn-decline {
       background: var(--surface);
       color: var(--red);
       border: 1px solid var(--red);
-      padding: 18px;
-      border-radius: 12px;
-      font-size: 17px;
-      font-weight: 600;
+      padding: 16px 22px;
+      border-radius: 999px;
+      font-size: 16px;
+      font-weight: 700;
       flex: 1;
       cursor: pointer;
       font-family: inherit;
+      transition: transform 0.1s ease;
     }
+    .btn-decline:active { transform: scale(0.98); }
 
     .input {
       width: 100%;
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 12px;
       padding: 14px 14px;
-      font-size: 17px;
+      font-size: 16px;
       color: var(--ink);
-      font-family: 'IBM Plex Mono', monospace;
+      font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+      font-variant-numeric: tabular-nums;
       box-sizing: border-box;
       -webkit-appearance: none;
     }
@@ -325,7 +364,7 @@ const Theme = () => (
       left: 0;
       right: 0;
       background: var(--surface);
-      border-top: 1px solid var(--border);
+      box-shadow: 0 -1px 0 var(--border);
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       padding: 8px 0 calc(env(safe-area-inset-bottom, 0) + 8px);
@@ -340,7 +379,7 @@ const Theme = () => (
       color: var(--muted);
       cursor: pointer;
       font-size: 11px;
-      font-weight: 500;
+      font-weight: 600;
     }
     .nav-item-active { color: var(--accent); }
 
@@ -354,28 +393,36 @@ const Theme = () => (
       background: var(--accent);
       color: white;
       border: none;
-      box-shadow: 0 8px 24px rgba(184, 64, 31, 0.4);
+      box-shadow: var(--shadow-fab);
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
       z-index: 20;
+      transition: transform 0.1s ease;
     }
+    .fab:active { transform: scale(0.94); }
 
     .pill {
       display: inline-flex;
-      padding: 3px 10px;
+      align-items: center;
+      padding: 5px 12px;
       border-radius: 999px;
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
     }
     .pill-accept { background: var(--green-soft); color: var(--green); }
     .pill-decline { background: var(--red-soft); color: var(--red); }
 
+    .pill-type-shop-deliver { background: var(--type-shop-deliver-soft); color: var(--type-shop-deliver); }
+    .pill-type-shop-only    { background: var(--type-shop-only-soft);    color: var(--type-shop-only); }
+    .pill-type-delivery-only{ background: var(--type-delivery-only-soft);color: var(--type-delivery-only); }
+    .pill-type-mixed        { background: var(--type-mixed-soft);        color: var(--type-mixed); }
+
     .bar {
       height: 8px;
-      background: var(--surface-2);
+      background: var(--border-soft);
       border-radius: 4px;
       overflow: hidden;
     }
@@ -392,7 +439,7 @@ const Theme = () => (
     .modal-bg {
       position: fixed;
       inset: 0;
-      background: rgba(26, 22, 18, 0.5);
+      background: rgba(15, 23, 42, 0.5);
       z-index: 50;
     }
     .modal {
@@ -598,6 +645,8 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
     delivery_only: 'Delivery only',
     mixed: 'Mixed'
   }[batch.type] || null;
+  const typeKey = (batch.type || 'shop_deliver').replace(/_/g, '-');
+  const typeColor = `var(--type-${typeKey})`;
   const milesLabel = batch.type === 'shop_only'
     ? `${batch.miles}mi to store`
     : `${batch.miles}mi total`;
@@ -610,7 +659,7 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
   const images = Array.isArray(batch.images) ? batch.images : [];
 
   return (
-    <div className="card p-4 fade-in">
+    <div className="card p-4 fade-in" style={{ borderLeft: `4px solid ${typeColor}` }}>
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1 flex-wrap">
@@ -618,7 +667,7 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
               {batch.accepted ? 'ACCEPTED' : 'DECLINED'}
             </span>
             {typeLabel && (
-              <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'IBM Plex Mono, monospace', letterSpacing: '0.04em' }}>
+              <span className={`pill pill-type-${typeKey}`}>
                 {typeLabel}
               </span>
             )}
@@ -775,7 +824,7 @@ function ReconcileForm({ batch, onSave, onCancel }) {
           <div>
             <div className="uppercase-label mb-2">Actual pay (total)</div>
             <div style={{ position: 'relative' }}>
-              <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted)', fontSize: 17, fontFamily: 'IBM Plex Mono, monospace' }}>$</span>
+              <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted-soft)', fontSize: 16, fontWeight: 600 }}>$</span>
               <input
                 className="input"
                 type="number"
@@ -794,7 +843,7 @@ function ReconcileForm({ batch, onSave, onCancel }) {
             <div>
               <div className="uppercase-label mb-2">Actual tip</div>
               <div style={{ position: 'relative' }}>
-                <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted)', fontSize: 17, fontFamily: 'IBM Plex Mono, monospace' }}>$</span>
+                <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted-soft)', fontSize: 16, fontWeight: 600 }}>$</span>
                 <input
                   className="input"
                   type="number"
@@ -1199,7 +1248,7 @@ function BulkImportForm({ onSave, onCancel }) {
                         {c._accepted ? 'ACCEPTED' : 'DECLINED'}
                       </span>
                       {c.type && (
-                        <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'IBM Plex Mono, monospace', letterSpacing: '0.04em' }}>
+                        <span className={`pill pill-type-${String(c.type).toLowerCase().replace(/_/g, '-')}`}>
                           {TYPE_LABELS[String(c.type).toLowerCase()] || c.type}
                         </span>
                       )}
@@ -1564,7 +1613,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
                 onChange={e => setPasteText(e.target.value)}
                 placeholder='pay=19.61 miles=5.3 items=49 units=69 store=Publix stops=2 minutes=53'
                 className="input"
-                style={{ minHeight: 70, fontSize: 13, fontFamily: 'IBM Plex Mono, monospace', resize: 'vertical' }}
+                style={{ minHeight: 70, fontSize: 13, resize: 'vertical' }}
               />
               <div className="flex gap-2 mt-2">
                 <button
@@ -1724,7 +1773,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
             <div>
               <div className="uppercase-label mb-2">Pay</div>
               <div style={{ position: 'relative' }}>
-                <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted)', fontSize: 17, fontFamily: 'IBM Plex Mono, monospace' }}>$</span>
+                <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted-soft)', fontSize: 16, fontWeight: 600 }}>$</span>
                 <input
                   className="input"
                   type="number"
@@ -1780,7 +1829,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
             <div>
               <div className="uppercase-label mb-2">Actual pay</div>
               <div style={{ position: 'relative' }}>
-                <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted)', fontSize: 17, fontFamily: 'IBM Plex Mono, monospace' }}>$</span>
+                <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted-soft)', fontSize: 16, fontWeight: 600 }}>$</span>
                 <input
                   className="input"
                   type="number"
