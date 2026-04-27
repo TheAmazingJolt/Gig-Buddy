@@ -452,6 +452,7 @@ function Header({ batches, syncStatus }) {
   const todayBatches = batches.filter(b => batchTime(b) >= startOfDay);
   const todayAccepted = todayBatches.filter(b => b.accepted);
   const todayPay = todayAccepted.reduce((s, b) => s + (b.pay || 0), 0);
+  const todayMiles = todayAccepted.reduce((s, b) => s + (b.miles || 0), 0);
 
   return (
     <div className="px-5 pt-8 pb-4">
@@ -459,12 +460,13 @@ function Header({ batches, syncStatus }) {
         <div className="uppercase-label">{todayStr}</div>
         <SyncIndicator status={syncStatus} />
       </div>
-      <div className="flex items-baseline gap-3 mt-1">
+      <div className="flex items-baseline gap-3 mt-1 flex-wrap">
         <span className="display" style={{ fontSize: 44, fontWeight: 600, lineHeight: 1 }}>
           {fmt$$(todayPay)}
         </span>
         <span style={{ color: 'var(--muted)', fontSize: 14 }}>
           today · {todayAccepted.length} accepted · {todayBatches.length - todayAccepted.length} declined
+          {todayMiles > 0 && <> · {todayMiles.toFixed(1)}mi</>}
         </span>
       </div>
     </div>
@@ -497,6 +499,7 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
       perHour: totalMin ? totalPay / (totalMin / 60) : null,
       perMile: totalMiles ? totalPay / totalMiles : null,
       totalPay,
+      totalMiles,
       count: accepted.length,
       offered: weekBatches.length
     };
@@ -530,12 +533,12 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
             </div>
           </div>
           <div className="divider my-4" style={{ background: 'rgba(255,255,255,0.1)' }} />
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-4 gap-2">
             <div>
               <div style={{ color: 'var(--muted-soft)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
                 $/hr
               </div>
-              <div className="mono" style={{ fontSize: 20, fontWeight: 500, marginTop: 2 }}>
+              <div className="mono" style={{ fontSize: 18, fontWeight: 500, marginTop: 2 }}>
                 {fmtRate(stats.perHour)}
               </div>
             </div>
@@ -543,15 +546,23 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
               <div style={{ color: 'var(--muted-soft)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
                 $/mi
               </div>
-              <div className="mono" style={{ fontSize: 20, fontWeight: 500, marginTop: 2 }}>
+              <div className="mono" style={{ fontSize: 18, fontWeight: 500, marginTop: 2 }}>
                 {fmtRate(stats.perMile)}
+              </div>
+            </div>
+            <div>
+              <div style={{ color: 'var(--muted-soft)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                Miles
+              </div>
+              <div className="mono" style={{ fontSize: 18, fontWeight: 500, marginTop: 2 }}>
+                {stats.totalMiles ? stats.totalMiles.toFixed(1) : '—'}
               </div>
             </div>
             <div>
               <div style={{ color: 'var(--muted-soft)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
                 Accept
               </div>
-              <div className="mono" style={{ fontSize: 20, fontWeight: 500, marginTop: 2 }}>
+              <div className="mono" style={{ fontSize: 18, fontWeight: 500, marginTop: 2 }}>
                 {stats.acceptRate != null ? `${stats.acceptRate.toFixed(0)}%` : '—'}
               </div>
             </div>
@@ -594,6 +605,8 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
   const reconciled = isReconciled(batch);
   const delta = payDelta(batch);
   const tipBait = delta != null && delta < 0;
+  // Hide the "Final" pill when the actual matches the offer exactly — no new info to show.
+  const showReconciledPill = reconciled && delta != null && Math.abs(delta) > 0.01;
   const images = Array.isArray(batch.images) ? batch.images : [];
 
   return (
@@ -609,16 +622,16 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
                 {typeLabel}
               </span>
             )}
-            <span style={{ fontSize: 13, color: 'var(--muted)', marginLeft: 'auto', textAlign: 'right' }}>
-              {batch.acceptedAt ? (
-                <>
-                  {fmtDate(batch.acceptedAt)} · {fmtTime(batch.acceptedAt)}
-                  {batch.completedAt && <>{' – '}{fmtTime(batch.completedAt)}</>}
-                </>
-              ) : (
-                <>{fmtDate(batch.loggedAt)} · {fmtTime(batch.loggedAt)}</>
-              )}
-            </span>
+          </div>
+          <div className="mono" style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, marginBottom: 4 }}>
+            {batch.acceptedAt ? (
+              <>
+                {fmtDate(batch.acceptedAt)} · {fmtTime(batch.acceptedAt)}
+                {batch.completedAt && <>{' – '}{fmtTime(batch.completedAt)}</>}
+              </>
+            ) : (
+              <>{fmtDate(batch.loggedAt)} · {fmtTime(batch.loggedAt)}</>
+            )}
           </div>
           <div className="display" style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.2 }}>
             {fmt$(batch.pay)} <span style={{ color: 'var(--muted)', fontSize: 15, fontWeight: 400 }}>· {batch.store || '—'}</span>
@@ -649,7 +662,7 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
             </div>
           )}
 
-          {batch.accepted && reconciled && (
+          {batch.accepted && showReconciledPill && (
             <div
               className="mono mt-2"
               style={{
