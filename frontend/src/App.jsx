@@ -1025,6 +1025,7 @@ function ImageViewer({ batch, onClose }) {
 function BulkImportForm({ onSave, onCancel }) {
   const [shots, setShots] = useState([]); // [{ name, dataUrl, base64, mediaType, takenAt }]
   const [phase, setPhase] = useState('upload'); // 'upload' | 'extracting' | 'review'
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState(null);
   const [candidates, setCandidates] = useState([]); // [{ ...batch, imageIndices, _accepted, _kept }]
   const [meta, setMeta] = useState({ indexFound: false, expectedCount: 0, summaryImageIndex: null, unmatchedImages: [] });
@@ -1066,59 +1067,141 @@ function BulkImportForm({ onSave, onCancel }) {
 
   const removeShot = (idx) => setShots(prev => prev.filter((_, i) => i !== idx));
 
+  // If too many images go in one request, the Anthropic call can take 60-120s
+  // and the connection drops. Cap each chunk's image count and run sequentially
+  // with a progress bar. Each chunk also includes the daily summary (heuristic:
+  // the latest-taken screenshot is almost always the daily summary in our data),
+  // so the index pattern still anchors per-batch totals.
+  const CHUNK_DETAIL_CAP = 6; // detail screenshots per chunk; +1 summary = 7 images per call
+
+  const compressShots = async (shotList) => Promise.all(shotList.map(async s => {
+    const dataUrl = await downscaleImage(s.dataUrl, 1080, 2400, 0.85);
+    const comma = dataUrl.indexOf(',');
+    return {
+      data: dataUrl.slice(comma + 1),
+      mediaType: 'image/jpeg',
+      takenAt: s.takenAt
+    };
+  }));
+
   const handleExtract = async () => {
     if (!shots.length) return;
     setError(null);
+    setProgress({ done: 0, total: 1 });
     setPhase('extracting');
     try {
-      // Downscale before sending. Original iPhone screenshots are ~1-3MB each as
-      // base64, and 7+ of them in one JSON request reliably triggers Safari's
-      // "Load failed" on cellular. The model reads compressed images fine.
-      const compressed = await Promise.all(shots.map(async s => {
-        const dataUrl = await downscaleImage(s.dataUrl, 1080, 2400, 0.85);
-        const comma = dataUrl.indexOf(',');
-        return {
-          data: dataUrl.slice(comma + 1),
-          mediaType: 'image/jpeg',
-          takenAt: s.takenAt
-        };
-      }));
-      const result = await extractMulti(compressed);
-      const lowered = result.batches.map(b => {
-        const out = {};
-        for (const k of Object.keys(b || {})) out[k.toLowerCase()] = b[k];
-        return out;
-      });
-      const prepared = lowered.map((b, i) => {
-        const screen = String(b.screentype || '').toLowerCase();
-        const isPostTrip = b.fromindex === true
-          || screen === 'summary'
-          || b.actualminutes != null
-          || b.actualpay != null;
-        return {
+      // Single-shot when small enough — keep the simpler, faster path.
+      if (shots.length <= CHUNK_DETAIL_CAP + 1) {
+        const compressed = await compressShots(shots);
+        const result = await extractMulti(compressed);
+        finishExtraction(result, shots);
+        setProgress({ done: 1, total: 1 });
+        setPhase('review');
+        return;
+      }
+
+      // Heuristic: daily summary is the latest-taken screenshot in the upload.
+      const sortedByTime = [...shots].sort((a, b) => Date.parse(b.takenAt) - Date.parse(a.takenAt));
+      const summaryShot = sortedByTime[0];
+      const detailShots = shots.filter(s => s !== summaryShot);
+
+      const chunks = [];
+      for (let i = 0; i < detailShots.length; i += CHUNK_DETAIL_CAP) {
+        chunks.push(detailShots.slice(i, i + CHUNK_DETAIL_CAP));
+      }
+      setProgress({ done: 0, total: chunks.length });
+
+      const allBatches = [];
+      const allUnmatched = [];
+      let indexFound = false;
+      let expectedCount = 0;
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunkShots = [summaryShot, ...chunks[i]];
+        const compressed = await compressShots(chunkShots);
+        const result = await extractMulti(compressed);
+
+        // Map chunk-local imageIndices (1-indexed in chunkShots) back to global
+        // shots array indices so the review UI shows the right thumbnails.
+        const chunkToGlobal = chunkShots.map(s => shots.indexOf(s) + 1);
+        const remappedBatches = result.batches.map(b => ({
           ...b,
-          _accepted: isPostTrip ? true : !defaultDeclined,
-          _kept: true,
-          _declineReasons: [],
-          _idx: i
-        };
-      });
-      setCandidates(prepared);
-      setMeta({
-        indexFound: result.indexFound,
-        expectedCount: result.expectedCount,
-        summaryImageIndex: result.summaryImageIndex,
-        unmatchedImages: result.unmatchedImages
-      });
+          imageIndices: Array.isArray(b.imageIndices)
+            ? b.imageIndices.map(idx => chunkToGlobal[idx - 1]).filter(Boolean)
+            : []
+        }));
+
+        // Dedup against the running accumulator: if a daily-summary entry
+        // matched in two chunks, prefer the one with more source thumbnails.
+        for (const b of remappedBatches) {
+          const key = b.fromIndex && b.indexEntryTime ? b.indexEntryTime : null;
+          if (key) {
+            const existingIdx = allBatches.findIndex(x => x.fromIndex && x.indexEntryTime === key);
+            if (existingIdx >= 0) {
+              if ((b.imageIndices || []).length > (allBatches[existingIdx].imageIndices || []).length) {
+                allBatches[existingIdx] = b;
+              }
+              continue;
+            }
+          }
+          allBatches.push(b);
+        }
+
+        if (result.indexFound) indexFound = true;
+        if (result.expectedCount > expectedCount) expectedCount = result.expectedCount;
+        for (const u of (result.unmatchedImages || [])) {
+          const g = chunkToGlobal[u - 1];
+          if (g) allUnmatched.push(g);
+        }
+
+        setProgress({ done: i + 1, total: chunks.length });
+      }
+
+      finishExtraction({
+        batches: allBatches,
+        indexFound,
+        expectedCount,
+        summaryImageIndex: shots.indexOf(summaryShot) + 1,
+        unmatchedImages: Array.from(new Set(allUnmatched))
+      }, shots);
       setPhase('review');
     } catch (err) {
       const raw = err?.message || '';
       const isNetwork = err?.name === 'TypeError' || raw === 'Load failed' || raw.includes('Failed to fetch') || raw.includes('NetworkError');
       setError(isNetwork
-        ? "Couldn't reach server. Check your connection and try again — if it keeps failing, try fewer images at once."
+        ? "Couldn't reach server. Check your connection and try again."
         : (raw || 'Extraction failed'));
       setPhase('upload');
     }
+  };
+
+  const finishExtraction = (result, originalShots) => {
+    const lowered = result.batches.map(b => {
+      const out = {};
+      for (const k of Object.keys(b || {})) out[k.toLowerCase()] = b[k];
+      return out;
+    });
+    const prepared = lowered.map((b, i) => {
+      const screen = String(b.screentype || '').toLowerCase();
+      const isPostTrip = b.fromindex === true
+        || screen === 'summary'
+        || b.actualminutes != null
+        || b.actualpay != null;
+      return {
+        ...b,
+        _accepted: isPostTrip ? true : !defaultDeclined,
+        _kept: true,
+        _declineReasons: [],
+        _idx: i
+      };
+    });
+    setCandidates(prepared);
+    setMeta({
+      indexFound: result.indexFound,
+      expectedCount: result.expectedCount,
+      summaryImageIndex: result.summaryImageIndex,
+      unmatchedImages: result.unmatchedImages
+    });
   };
 
   const toggleAccept = (idx) => {
@@ -1351,12 +1434,22 @@ function BulkImportForm({ onSave, onCancel }) {
         )}
 
         {phase === 'extracting' && (
-          <div className="card p-8 text-center">
+          <div className="card p-6 text-center">
             <Loader2 size={28} className="animate-spin" style={{ color: 'var(--muted)', margin: '0 auto 12px' }} />
-            <div style={{ fontSize: 15, fontWeight: 500 }}>Extracting…</div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>Extracting…</div>
             <div className="mono mt-1" style={{ fontSize: 12, color: 'var(--muted)' }}>
-              Grouping {shots.length} images into batches
+              {progress.total > 1
+                ? `Chunk ${progress.done} of ${progress.total} · ${shots.length} images total`
+                : `Grouping ${shots.length} images into batches`}
             </div>
+            {progress.total > 1 && (
+              <div className="bar mt-3" style={{ width: '100%' }}>
+                <div
+                  className="bar-fill"
+                  style={{ width: `${(progress.done / progress.total) * 100}%`, transition: 'width 0.3s' }}
+                />
+              </div>
+            )}
           </div>
         )}
 
