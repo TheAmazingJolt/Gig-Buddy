@@ -4,6 +4,7 @@ import {
   Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff
 } from 'lucide-react';
 import { api, extractMulti } from './api';
+import { getImages, setImages, deleteImages } from './imageStore';
 
 const EXTRACTOR_URL = import.meta.env.VITE_EXTRACTOR_URL;
 
@@ -137,38 +138,53 @@ const fmtTime = (ts) => {
 // Storage
 // ──────────────────────────────────────────────────────────
 
+// Batch metadata lives in localStorage (small, sync read = instant first paint).
+// Image arrays live in IndexedDB (much bigger quota, plenty of room for hundreds
+// of batches). loadBatches re-joins them; saveBatches splits them.
 async function loadBatches() {
+  let parsed = [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
+      const candidate = JSON.parse(raw);
+      if (Array.isArray(candidate)) parsed = candidate;
     }
-  } catch (e) { /* corrupt or unavailable */ }
-  return [];
+  } catch (e) { /* corrupt or unavailable — ignore, return [] below */ }
+
+  // Hydrate images from IDB. Legacy batches saved before this split keep their
+  // inline images intact and will get migrated on the next saveBatches.
+  try {
+    return await Promise.all(parsed.map(async b => {
+      if (Array.isArray(b.images) && b.images.length) return b;
+      const images = await getImages(b.id);
+      return images ? { ...b, images } : b;
+    }));
+  } catch (e) {
+    return parsed;
+  }
 }
 
-// localStorage on iOS Safari caps around ~5MB. With ~30-80KB of base64 image data
-// per batch, the cache overflows quickly. On QuotaExceededError, retry without the
-// images — the server keeps the full data and sync re-hydrates them on next load.
+// Split storage: metadata to localStorage (without images), images to IDB by id.
+// Migrates legacy data on first save: any batch with embedded images here gets
+// its images moved to IDB and the field stripped from the localStorage payload.
 async function saveBatches(batches) {
+  const slim = batches.map(b => {
+    if (!('images' in b)) return b;
+    const { images: _drop, ...rest } = b;
+    return rest;
+  });
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(batches));
-    return;
-  } catch (e) {
-    const isQuota = e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);
-    if (!isQuota) {
-      console.error('save failed', e);
-      return;
-    }
-  }
-  try {
-    const slim = batches.map(b => b.images ? { ...b, images: null } : b);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
-    console.warn('localStorage full — saved without images; they will reload from server on next sync');
-  } catch (e2) {
-    console.error('save failed even without images', e2);
+  } catch (e) {
+    console.error('saveBatches metadata write failed', e);
   }
+  // Best-effort image persistence. Failures are logged but don't block
+  // the metadata save — images can be re-hydrated from the server.
+  await Promise.all(batches.map(async b => {
+    if (Array.isArray(b.images) && b.images.length) {
+      await setImages(b.id, b.images);
+    }
+  }));
 }
 
 // ──────────────────────────────────────────────────────────
@@ -2640,6 +2656,7 @@ export default function App() {
     const next = batches.filter(b => b.id !== id);
     setBatches(next);
     await saveBatches(next);
+    deleteImages(id).catch(e => console.warn('delete IDB images failed', e));
     removeOne(id);
   };
 
