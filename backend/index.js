@@ -69,14 +69,42 @@ function reconcileMileage(obj) {
 // shop_only batches end at the store, not a customer address). IC's
 // "Active hours" runs from acceptance to completion, so:
 //   completedAt = acceptedAt + actualMinutes
+// Also runs a sanity check the other direction: if completedAt and
+// actualMinutes both came through correctly but acceptedAt is missing
+// or grossly inconsistent (>5 min off from completedAt - actualMinutes),
+// trust the direct screen readings and recompute acceptedAt from them.
+// This catches model mis-parses of "1:28pm" -> "9:28 AM" etc.
 function reconcileTimes(obj) {
   if (!obj || typeof obj !== 'object') return obj;
-  if (obj.completedAt) return obj;
-  if (!obj.acceptedAt || !obj.actualMinutes) return obj;
-  const start = Date.parse(obj.acceptedAt);
-  if (Number.isNaN(start)) return obj;
-  const endMs = start + Math.round(Number(obj.actualMinutes) * 60_000);
-  obj.completedAt = new Date(endMs).toISOString();
+
+  // Forward derivation: acceptedAt + actualMinutes -> completedAt when missing.
+  if (!obj.completedAt && obj.acceptedAt && obj.actualMinutes) {
+    const start = Date.parse(obj.acceptedAt);
+    if (!Number.isNaN(start)) {
+      obj.completedAt = new Date(start + Math.round(Number(obj.actualMinutes) * 60_000)).toISOString();
+    }
+  }
+
+  // Backward sanity check: when completedAt + actualMinutes are both present,
+  // expect acceptedAt within 5 min of (completedAt - actualMinutes). If not,
+  // overwrite acceptedAt with the computed value — those direct readings are
+  // more reliable than the model's parse of the journey "Accepted:" line.
+  if (obj.completedAt && obj.actualMinutes) {
+    const end = Date.parse(obj.completedAt);
+    if (!Number.isNaN(end)) {
+      const expectedStartMs = end - Math.round(Number(obj.actualMinutes) * 60_000);
+      const expectedIso = new Date(expectedStartMs).toISOString();
+      if (!obj.acceptedAt) {
+        obj.acceptedAt = expectedIso;
+      } else {
+        const claimedStart = Date.parse(obj.acceptedAt);
+        if (Number.isNaN(claimedStart) || Math.abs(claimedStart - expectedStartMs) > 5 * 60_000) {
+          obj.acceptedAt = expectedIso;
+        }
+      }
+    }
+  }
+
   return obj;
 }
 

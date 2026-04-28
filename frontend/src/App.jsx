@@ -1062,7 +1062,21 @@ function BulkImportForm({ onSave, onCancel }) {
     })));
 
     // Sort by capture time so the order in thumbnails matches the order sent to the model
-    setShots(prev => [...prev, ...next].slice(0, 20).sort((a, b) => new Date(a.takenAt) - new Date(b.takenAt)));
+    // Stable sort: takenAt first, then numeric portion of filename as tiebreaker.
+    // iOS Safari often rounds lastModified to whole seconds when picked from
+    // Photos, so two back-to-back screenshots can tie. iOS screenshots have
+    // sequential filenames (IMG_1234, IMG_1235) which is a reliable secondary
+    // ordering signal.
+    const nameOrder = (name) => {
+      const m = String(name || '').match(/(\d+)/);
+      return m ? parseInt(m[1], 10) : 0;
+    };
+    setShots(prev => [...prev, ...next].slice(0, 20).sort((a, b) => {
+      const ta = Date.parse(a.takenAt);
+      const tb = Date.parse(b.takenAt);
+      if (ta !== tb) return ta - tb;
+      return nameOrder(a.name) - nameOrder(b.name);
+    }));
   };
 
   const removeShot = (idx) => setShots(prev => prev.filter((_, i) => i !== idx));
@@ -1109,10 +1123,31 @@ function BulkImportForm({ onSave, onCancel }) {
         : [...shots].sort((a, b) => Date.parse(b.takenAt) - Date.parse(a.takenAt))[0];
       const detailShots = summaryShot ? shots.filter(s => s !== summaryShot) : shots;
 
-      const chunks = [];
-      for (let i = 0; i < detailShots.length; i += CHUNK_DETAIL_CAP) {
-        chunks.push(detailShots.slice(i, i + CHUNK_DETAIL_CAP));
+      // Cluster-aware chunking: shots taken within 5 min of each other belong
+      // to the same batch (typically the offer + the post-trip summary
+      // screenshot pair). Group them into clusters first, then bin-pack
+      // clusters into chunks without splitting any cluster across a boundary.
+      const CLUSTER_GAP_MS = 5 * 60 * 1000;
+      const sorted = [...detailShots].sort((a, b) => Date.parse(a.takenAt) - Date.parse(b.takenAt));
+      const clusters = [];
+      for (const s of sorted) {
+        const last = clusters[clusters.length - 1];
+        if (last && (Date.parse(s.takenAt) - Date.parse(last[last.length - 1].takenAt)) < CLUSTER_GAP_MS) {
+          last.push(s);
+        } else {
+          clusters.push([s]);
+        }
       }
+      const chunks = [];
+      let current = [];
+      for (const cluster of clusters) {
+        if (current.length > 0 && current.length + cluster.length > CHUNK_DETAIL_CAP) {
+          chunks.push(current);
+          current = [];
+        }
+        current.push(...cluster);
+      }
+      if (current.length > 0) chunks.push(current);
       setProgress({ done: 0, total: chunks.length });
 
       const allBatches = [];
@@ -1127,11 +1162,15 @@ function BulkImportForm({ onSave, onCancel }) {
 
         // Map chunk-local imageIndices (1-indexed in chunkShots) back to global
         // shots array indices so the review UI shows the right thumbnails.
+        // The summary's global index is NEVER allowed in a batch's imageIndices
+        // — the model occasionally puts it there by mistake, polluting the
+        // first batch's thumbnails with the daily summary screenshot.
         const chunkToGlobal = chunkShots.map(s => shots.indexOf(s) + 1);
+        const summaryGlobal = summaryShot ? shots.indexOf(summaryShot) + 1 : null;
         const remappedBatches = result.batches.map(b => ({
           ...b,
           imageIndices: Array.isArray(b.imageIndices)
-            ? b.imageIndices.map(idx => chunkToGlobal[idx - 1]).filter(Boolean)
+            ? b.imageIndices.map(idx => chunkToGlobal[idx - 1]).filter(g => g && g !== summaryGlobal)
             : []
         }));
 
