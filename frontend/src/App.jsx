@@ -951,6 +951,8 @@ function BulkImportForm({ onSave, onCancel }) {
   const [error, setError] = useState(null);
   const [candidates, setCandidates] = useState([]); // [{ ...batch, imageIndices, _accepted, _kept }]
   const [meta, setMeta] = useState({ indexFound: false, expectedCount: 0, summaryImageIndex: null, unmatchedImages: [] });
+  const [defaultDeclined, setDefaultDeclined] = useState(false);
+  const [viewerImages, setViewerImages] = useState(null); // array of dataUrls for the inline ImageViewer
 
   const TYPE_LABELS = {
     shop_deliver: 'Shop & deliver',
@@ -1002,13 +1004,20 @@ function BulkImportForm({ onSave, onCancel }) {
         for (const k of Object.keys(b || {})) out[k.toLowerCase()] = b[k];
         return out;
       });
-      const prepared = lowered.map((b, i) => ({
-        ...b,
-        _accepted: true,
-        _kept: true,
-        _declineReason: null,
-        _idx: i
-      }));
+      const prepared = lowered.map((b, i) => {
+        const screen = String(b.screentype || '').toLowerCase();
+        const isPostTrip = b.fromindex === true
+          || screen === 'summary'
+          || b.actualminutes != null
+          || b.actualpay != null;
+        return {
+          ...b,
+          _accepted: isPostTrip ? true : !defaultDeclined,
+          _kept: true,
+          _declineReason: null,
+          _idx: i
+        };
+      });
       setCandidates(prepared);
       setMeta({
         indexFound: result.indexFound,
@@ -1147,6 +1156,31 @@ function BulkImportForm({ onSave, onCancel }) {
               </div>
             </div>
 
+            <div className="card mb-3 p-3">
+              <div className="uppercase-label mb-2">Default state</div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDefaultDeclined(false)}
+                  className={`chip ${!defaultDeclined ? 'chip-active' : ''}`}
+                  style={{ flex: 1, justifyContent: 'center' }}
+                >
+                  Accepted
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDefaultDeclined(true)}
+                  className={`chip ${defaultDeclined ? 'chip-active' : ''}`}
+                  style={{ flex: 1, justifyContent: 'center' }}
+                >
+                  Declined
+                </button>
+              </div>
+              <div className="mono mt-2" style={{ fontSize: 11, color: 'var(--muted)' }}>
+                Each candidate starts with this state — flip individual cards on the next screen if needed. Post-trip summary screenshots are always Accepted regardless.
+              </div>
+            </div>
+
             <div className="card-strong p-3">
               <div className="flex items-baseline justify-between mb-2">
                 <div className="uppercase-label">Screenshots</div>
@@ -1164,10 +1198,11 @@ function BulkImportForm({ onSave, onCancel }) {
                       <img
                         src={s.dataUrl}
                         alt={`shot ${i + 1}`}
-                        style={{ height: 88, width: 'auto', borderRadius: 8, border: '1px solid var(--border)', display: 'block' }}
+                        onClick={() => setViewerImages(shots.map(x => x.dataUrl))}
+                        style={{ height: 88, width: 'auto', borderRadius: 8, border: '1px solid var(--border)', display: 'block', cursor: 'pointer' }}
                       />
                       <button
-                        onClick={() => removeShot(i)}
+                        onClick={(e) => { e.stopPropagation(); removeShot(i); }}
                         aria-label="Remove"
                         style={{
                           position: 'absolute', top: -6, right: -6, width: 22, height: 22,
@@ -1297,7 +1332,11 @@ function BulkImportForm({ onSave, onCancel }) {
                       {c.orders != null && c.orders > 1 && <> · {c.orders} orders</>}
                     </div>
                     {sources.length > 0 && (
-                      <div style={{ display: 'flex', gap: 6, overflowX: 'auto', marginTop: 10 }}>
+                      <div
+                        style={{ display: 'flex', gap: 6, overflowX: 'auto', marginTop: 10, cursor: 'pointer' }}
+                        onClick={() => setViewerImages(sources.map(s => s.dataUrl))}
+                        role="button"
+                      >
                         {sources.map((s, i) => (
                           <img
                             key={i}
@@ -1372,6 +1411,13 @@ function BulkImportForm({ onSave, onCancel }) {
           </>
         )}
       </div>
+
+      {viewerImages && (
+        <ImageViewer
+          batch={{ images: viewerImages }}
+          onClose={() => setViewerImages(null)}
+        />
+      )}
     </div>
   );
 }
