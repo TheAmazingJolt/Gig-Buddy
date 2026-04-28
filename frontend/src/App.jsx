@@ -1071,11 +1071,19 @@ function BulkImportForm({ onSave, onCancel }) {
     setError(null);
     setPhase('extracting');
     try {
-      const result = await extractMulti(shots.map(s => ({
-        data: s.base64,
-        mediaType: s.mediaType,
-        takenAt: s.takenAt
-      })));
+      // Downscale before sending. Original iPhone screenshots are ~1-3MB each as
+      // base64, and 7+ of them in one JSON request reliably triggers Safari's
+      // "Load failed" on cellular. The model reads compressed images fine.
+      const compressed = await Promise.all(shots.map(async s => {
+        const dataUrl = await downscaleImage(s.dataUrl, 1080, 2400, 0.85);
+        const comma = dataUrl.indexOf(',');
+        return {
+          data: dataUrl.slice(comma + 1),
+          mediaType: 'image/jpeg',
+          takenAt: s.takenAt
+        };
+      }));
+      const result = await extractMulti(compressed);
       const lowered = result.batches.map(b => {
         const out = {};
         for (const k of Object.keys(b || {})) out[k.toLowerCase()] = b[k];
@@ -1104,7 +1112,11 @@ function BulkImportForm({ onSave, onCancel }) {
       });
       setPhase('review');
     } catch (err) {
-      setError(err.message || 'Extraction failed');
+      const raw = err?.message || '';
+      const isNetwork = err?.name === 'TypeError' || raw === 'Load failed' || raw.includes('Failed to fetch') || raw.includes('NetworkError');
+      setError(isNetwork
+        ? "Couldn't reach server. Check your connection and try again — if it keeps failing, try fewer images at once."
+        : (raw || 'Extraction failed'));
       setPhase('upload');
     }
   };
@@ -1687,13 +1699,18 @@ function LogForm({ onSave, onCancel, onBulk }) {
 
     setExtracting(true);
     try {
+      // Downscale before upload — full-res iPhone screenshots make request bodies
+      // big enough to fail with Safari's "Load failed" on flaky cellular.
+      const compressed = await Promise.all(shots.map(async s => {
+        const dataUrl = await downscaleImage(s.dataUrl, 1080, 2400, 0.85);
+        const comma = dataUrl.indexOf(',');
+        return { data: dataUrl.slice(comma + 1), mediaType: 'image/jpeg' };
+      }));
       const url = EXTRACTOR_URL.replace(/\/$/, '') + '/extract';
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          images: shots.map(s => ({ data: s.base64, mediaType: s.mediaType }))
-        })
+        body: JSON.stringify({ images: compressed })
       });
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.ok) {
@@ -1707,7 +1724,11 @@ function LogForm({ onSave, onCancel, onBulk }) {
       setMode(null);
       flashSuccess();
     } catch (err) {
-      setExtractError(err.message || 'Extraction failed');
+      const raw = err?.message || '';
+      const isNetwork = err?.name === 'TypeError' || raw === 'Load failed' || raw.includes('Failed to fetch') || raw.includes('NetworkError');
+      setExtractError(isNetwork
+        ? "Couldn't reach server. Check your connection and try again — if it keeps failing, try fewer images at once."
+        : (raw || 'Extraction failed'));
     } finally {
       setExtracting(false);
     }
