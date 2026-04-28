@@ -316,11 +316,12 @@ If you find a daily summary:
   1. Extract its index — list every batch entry with its start time, total $, and order count.
   2. The number of batches you return MUST EQUAL the number of entries in the daily summary's batch list.
   3. For EACH index entry, find the detail screenshots (offer / summary / item-detail) that match. BE GENEROUS in matching: any of these signals is enough — the visible total $ within ~$0.50, the accepted/start time within ~5 minutes, the store name, the item count. You do NOT need all signals to match; one or two strong ones is plenty.
-  3a. CROSS-REFERENCE TIMES across screenshots aggressively. The same batch often shows the same time in multiple places:
-      - The iOS status bar clock at the top of an OFFER screenshot (e.g. "11:23" in the system bar) is when the user took the screenshot, which is usually within seconds of when the offer arrived → this matches the summary entry's start time.
-      - The "Accepted: HH:MMam/pm" line in the journey timeline of a SUMMARY screenshot for the same batch shows that exact same start time.
-      - The header date+time on a summary screen ("Sunday, April 26, 11:23am") also shows the start time.
-      Two detail screenshots whose times match within a few minutes almost certainly represent the SAME batch — even if one is an offer and the other is a post-completion summary. MATCH THEM TO THE SAME index entry; both go into that entry's imageIndices array.
+  3a. CROSS-REFERENCE IN-APP TIMES across screenshots aggressively. Each batch summary screen prints the batch's start time in MULTIPLE in-app locations, and the same batch is often captured in TWO OR MORE summary screenshots (one of the top earnings/tips area, one of the journey/items area). All of those screenshots share the same start time. The signals to look for, in priority order:
+      - The header date+time below "Batch summary" — e.g. "Tuesday, April 28, 2:55pm". Always present on a summary's top portion.
+      - The "Accepted: HH:MMam/pm" line in the journey timeline (e.g. "Accepted: 2:55pm  Your location"). Present on a summary's bottom portion.
+      - Drop-off times in the journey ("Drop off: 3:56pm Order A") — these all belong to the same batch as the matching Accepted time.
+      - As a weak fallback only: the iOS status bar clock at the top of an OFFER screenshot (since the user often took it right when the offer landed).
+      RULE: any two detail screenshots that share a visible start time (within a few minutes) belong to the SAME batch. Add ALL of their indices into that batch's imageIndices array. This is true even when one screenshot shows the earnings breakdown and the other shows the journey — they're the same batch viewed at different scroll positions.
   4. The "pay" field for each batch MUST equal the total $ from the matching daily summary entry — that is the authoritative final amount. Do not pull pay from the detail screenshots when an index entry exists.
   5. Set "fromIndex": true and "indexEntryTime": the matching index time on every batch.
   6. If an index entry has NO matching detail screenshots, still return a batch object using only the index data (time, total, order count). Set imageIndices to [] and screenType to "unknown".
