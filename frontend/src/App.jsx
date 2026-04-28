@@ -65,6 +65,16 @@ const DEFAULT_STORES = [
   "BJ's", 'Target', 'CVS', 'Petco', 'Other'
 ];
 
+const DECLINE_REASONS = [
+  { val: 'too_far',         label: 'Too far' },
+  { val: 'pay_low',         label: 'Pay too low' },
+  { val: 'too_many_items',  label: 'Too many items' },
+  { val: 'bad_time',        label: 'Bad time' },
+  { val: 'cherry_pick',     label: 'Cherry-pick' },
+  { val: 'other',           label: 'Other' }
+];
+const DECLINE_REASON_LABELS = Object.fromEntries(DECLINE_REASONS.map(r => [r.val, r.label]));
+
 // ──────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────
@@ -669,6 +679,11 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
             {typeLabel && (
               <span className={`pill pill-type-${typeKey}`}>
                 {typeLabel}
+              </span>
+            )}
+            {!batch.accepted && batch.declineReason && (
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                · {DECLINE_REASON_LABELS[batch.declineReason] || batch.declineReason}
               </span>
             )}
           </div>
@@ -1345,6 +1360,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
   const [storeOther, setStoreOther] = useState('');
   const [notes, setNotes] = useState('');
   const [type, setType] = useState('shop_deliver');
+  const [declineReason, setDeclineReason] = useState(null);
   const [acceptedAt, setAcceptedAt] = useState(null);
   const [completedAt, setCompletedAt] = useState(null);
   const [fromSummary, setFromSummary] = useState(false); // set by extraction when screenType === 'summary'
@@ -1549,6 +1565,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
       orders: orders ? parseInt(orders) : 1,
       store: finalStore || null,
       accepted,
+      declineReason: !accepted ? declineReason : null,
       notes: notes || null,
       source: 'quick',
       images,
@@ -1911,6 +1928,24 @@ function LogForm({ onSave, onCancel, onBulk }) {
           </div>
         </div>
 
+        {!fromSummary && (
+          <div className="mt-5">
+            <div className="uppercase-label mb-2">Decline reason (if declining)</div>
+            <div className="flex flex-wrap gap-2">
+              {DECLINE_REASONS.map(r => (
+                <button
+                  key={r.val}
+                  type="button"
+                  onClick={() => setDeclineReason(declineReason === r.val ? null : r.val)}
+                  className={`chip ${declineReason === r.val ? 'chip-active' : ''}`}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="flex gap-3 mt-6 mb-8">
           {!fromSummary && (
             <button
@@ -2062,7 +2097,23 @@ function Insights({ batches }) {
       count: s.count
     }));
 
-    return { storeStats, bucketStats, dayStats };
+    // Decline reasons — count per reason among declined batches in the filtered set
+    const reasonCounts = {};
+    filtered.filter(b => !b.accepted).forEach(b => {
+      const r = b.declineReason || 'unspecified';
+      reasonCounts[r] = (reasonCounts[r] || 0) + 1;
+    });
+    const totalDeclined = Object.values(reasonCounts).reduce((a, b) => a + b, 0);
+    const reasonStats = Object.entries(reasonCounts)
+      .map(([reason, count]) => ({
+        reason,
+        label: reason === 'unspecified' ? 'No reason given' : (DECLINE_REASON_LABELS[reason] || reason),
+        count,
+        rate: totalDeclined ? count / totalDeclined : 0
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    return { storeStats, bucketStats, dayStats, reasonStats, totalDeclined };
   }, [filtered]);
 
   const FilterChips = () => (
@@ -2207,6 +2258,29 @@ function Insights({ batches }) {
           </div>
         </div>
       </div>
+
+      {insights.totalDeclined > 0 && (
+        <div className="px-5 mb-6">
+          <div className="uppercase-label mb-3">
+            Why you decline · {insights.totalDeclined} total
+          </div>
+          <div className="card p-4 space-y-3">
+            {insights.reasonStats.map(r => (
+              <div key={r.reason}>
+                <div className="flex justify-between items-baseline mb-1">
+                  <span style={{ fontSize: 14, fontWeight: 600 }}>{r.label}</span>
+                  <span className="mono" style={{ fontSize: 13 }}>
+                    {r.count} <span style={{ color: 'var(--muted)' }}>· {(r.rate * 100).toFixed(0)}%</span>
+                  </span>
+                </div>
+                <div className="bar">
+                  <div className="bar-fill" style={{ width: `${r.rate * 100}%`, background: 'var(--red)' }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
