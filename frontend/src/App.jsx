@@ -2520,29 +2520,6 @@ function Insights({ batches }) {
   const insights = useMemo(() => {
     if (filtered.length < 3) return null;
 
-    const byStore = {};
-    filtered.forEach(b => {
-      if (!b.store) return;
-      if (!byStore[b.store]) byStore[b.store] = { offered: 0, accepted: 0, totalPay: 0, totalMiles: 0, totalMin: 0 };
-      byStore[b.store].offered++;
-      if (b.accepted) {
-        byStore[b.store].accepted++;
-        byStore[b.store].totalPay += b.pay || 0;
-        byStore[b.store].totalMiles += b.miles || 0;
-        byStore[b.store].totalMin += bestMinutes(b) || 0;
-      }
-    });
-    const storeStats = Object.entries(byStore)
-      .map(([store, s]) => ({
-        store,
-        offered: s.offered,
-        accepted: s.accepted,
-        acceptRate: s.offered ? s.accepted / s.offered : 0,
-        perHour: s.totalMin ? s.totalPay / (s.totalMin / 60) : null,
-        perMile: s.totalMiles ? s.totalPay / s.totalMiles : null,
-        avgPay: s.accepted ? s.totalPay / s.accepted : null
-      }))
-      .sort((a, b) => (b.perHour || 0) - (a.perHour || 0));
 
     const buckets = showMoreBuckets ? [
       { label: '< $10', min: 0, max: 10 },
@@ -2611,7 +2588,7 @@ function Insights({ batches }) {
       }))
       .sort((a, b) => b.count - a.count);
 
-    return { storeStats, bucketStats, dayStats, reasonStats, totalDeclined };
+    return { bucketStats, dayStats, reasonStats, totalDeclined };
   }, [filtered, showMoreBuckets]);
 
   const FilterChips = () => (
@@ -2676,9 +2653,7 @@ function Insights({ batches }) {
     );
   }
 
-  const maxPerHour = Math.max(...insights.storeStats.map(s => s.perHour || 0), 0.01);
   const maxDay = Math.max(...insights.dayStats.map(d => d.perHour || 0), 0.01);
-  const showPerMile = typeFilter !== 'shop_only'; // $/mi is misleading for shop_only
 
   return (
     <div>
@@ -2692,26 +2667,6 @@ function Insights({ batches }) {
           </div>
         </div>
       )}
-
-      <div className="px-5 mb-6">
-        <div className="uppercase-label mb-3">$/hr by store</div>
-        <div className="card p-4 space-y-3">
-          {insights.storeStats.filter(s => s.perHour != null).slice(0, 6).map(s => (
-            <div key={s.store}>
-              <div className="flex justify-between items-baseline mb-1">
-                <span style={{ fontSize: 14, fontWeight: 500 }}>{s.store}</span>
-                <span className="mono" style={{ fontSize: 13 }}>{fmtRate(s.perHour)}/hr</span>
-              </div>
-              <div className="bar">
-                <div className="bar-fill" style={{ width: `${(s.perHour / maxPerHour) * 100}%` }} />
-              </div>
-              <div className="mono mt-1" style={{ fontSize: 11, color: 'var(--muted)' }}>
-                {s.accepted}/{s.offered} accepted · {fmtRate(s.perMile)}/mi · avg {fmt$(s.avgPay)}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
 
       <div className="px-5 mb-6">
         <div className="uppercase-label mb-3">Accept rate by pay</div>
