@@ -315,11 +315,13 @@ The daily summary is the single most reliable source. Identify it by these marke
 If you find a daily summary:
   1. Extract its index — list every batch entry with its start time, total $, and order count.
   2. The number of batches you return MUST EQUAL the number of entries in the daily summary's batch list.
-  3. For EACH index entry, find the detail screenshots (offer / summary / item-detail) that match by total $ AND start time visible inside the screenshot.
+  3. For EACH index entry, find the detail screenshots (offer / summary / item-detail) that match. BE GENEROUS in matching: any of these signals is enough — the visible total $ within ~$0.50, the accepted/start time within ~5 minutes, the store name, the item count. You do NOT need all signals to match; one or two strong ones is plenty.
   4. The "pay" field for each batch MUST equal the total $ from the matching daily summary entry — that is the authoritative final amount. Do not pull pay from the detail screenshots when an index entry exists.
   5. Set "fromIndex": true and "indexEntryTime": the matching index time on every batch.
   6. If an index entry has NO matching detail screenshots, still return a batch object using only the index data (time, total, order count). Set imageIndices to [] and screenType to "unknown".
-  7. The daily summary screenshot itself is NOT a batch — do not include it in the batches array. Add its image index to "summaryImageIndex".
+  7. The daily summary screenshot itself is NOT a batch — do not include it in the batches array. Add its image index to "summaryImageIndex". The summary image must NEVER appear in unmatchedImages.
+  8. The user may be uploading screenshots in chunks, so the daily summary (with N entries) may be present even when only a SUBSET of detail screenshots is in this view. That's expected and fine — return all N batches; the ones without matching details simply have imageIndices=[].
+  9. unmatchedImages should be RARE. Only put an image there when it is clearly NOT a batch-related screenshot (e.g. a stray photo of something else, a settings page, a notification). If a detail screenshot has any plausible signal pointing to a summary entry, MATCH IT to that entry rather than flagging it as unmatched.
 
 If NO daily summary is present (indexFound: false):
   Fall back to grouping by content + timestamps:
@@ -369,7 +371,7 @@ Return ONLY a valid JSON object — no markdown, no code fences, no prose:
       "indexEntryTime": string | null
     }
   ],
-  "unmatchedImages": [number, ...]   // 1-indexed images that couldn't be matched to any index entry
+  "unmatchedImages": [number, ...]   // 1-indexed images that are clearly NOT batch-related. Should usually be empty. Never includes the daily summary image. Detail screenshots that plausibly belong to a summary entry should be MATCHED, not flagged here.
 }`;
 
     content.push({ type: 'text', text: multiPrompt });
