@@ -1100,10 +1100,14 @@ function BulkImportForm({ onSave, onCancel }) {
         return;
       }
 
-      // Heuristic: daily summary is the latest-taken screenshot in the upload.
-      const sortedByTime = [...shots].sort((a, b) => Date.parse(b.takenAt) - Date.parse(a.takenAt));
-      const summaryShot = sortedByTime[0];
-      const detailShots = shots.filter(s => s !== summaryShot);
+      // For declined-default imports, there's no daily summary — declined offers
+      // never appear in it. Chunk plain detail screenshots without the summary.
+      // For accepted-default, heuristically use the latest-taken screenshot as
+      // the daily summary anchor and include it in every chunk.
+      const summaryShot = defaultDeclined
+        ? null
+        : [...shots].sort((a, b) => Date.parse(b.takenAt) - Date.parse(a.takenAt))[0];
+      const detailShots = summaryShot ? shots.filter(s => s !== summaryShot) : shots;
 
       const chunks = [];
       for (let i = 0; i < detailShots.length; i += CHUNK_DETAIL_CAP) {
@@ -1117,7 +1121,7 @@ function BulkImportForm({ onSave, onCancel }) {
       let expectedCount = 0;
 
       for (let i = 0; i < chunks.length; i++) {
-        const chunkShots = [summaryShot, ...chunks[i]];
+        const chunkShots = summaryShot ? [summaryShot, ...chunks[i]] : chunks[i];
         const compressed = await compressShots(chunkShots);
         const result = await extractMulti(compressed);
 
@@ -1161,7 +1165,7 @@ function BulkImportForm({ onSave, onCancel }) {
         batches: allBatches,
         indexFound,
         expectedCount,
-        summaryImageIndex: shots.indexOf(summaryShot) + 1,
+        summaryImageIndex: summaryShot ? shots.indexOf(summaryShot) + 1 : null,
         unmatchedImages: Array.from(new Set(allUnmatched))
       }, shots);
       setPhase('review');
@@ -1322,20 +1326,22 @@ function BulkImportForm({ onSave, onCancel }) {
       <div className="px-5">
         {phase === 'upload' && (
           <>
-            <div
-              className="card mb-3 p-3"
-              style={{ background: 'var(--accent-soft)', borderColor: 'transparent' }}
-            >
-              <div className="uppercase-label" style={{ color: 'var(--accent)', marginBottom: 6 }}>
-                Required: daily summary
+            {!defaultDeclined && (
+              <div
+                className="card mb-3 p-3"
+                style={{ background: 'var(--accent-soft)', borderColor: 'transparent' }}
+              >
+                <div className="uppercase-label" style={{ color: 'var(--accent)', marginBottom: 6 }}>
+                  Required: daily summary
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4 }}>
+                  Include a screenshot of your <strong>day summary</strong> screen — the one that lists every batch with its time and total (e.g. "Sun, Apr 26 · Total $184.06 · 7 batches"). Without it, batches won't group reliably.
+                </div>
+                <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+                  Then add the offer / batch-summary screenshots for each batch.
+                </div>
               </div>
-              <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4 }}>
-                Include a screenshot of your <strong>day summary</strong> screen — the one that lists every batch with its time and total (e.g. "Sun, Apr 26 · Total $184.06 · 7 batches"). Without it, batches won't group reliably.
-              </div>
-              <div className="mono" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
-                Then add the offer / batch-summary screenshots for each batch.
-              </div>
-            </div>
+            )}
 
             <div className="card mb-3 p-3">
               <div className="uppercase-label mb-2">Default state</div>
@@ -1455,7 +1461,7 @@ function BulkImportForm({ onSave, onCancel }) {
 
         {phase === 'review' && (
           <>
-            {meta.indexFound ? (
+            {!defaultDeclined && meta.indexFound && (
               <div
                 className="card mb-3 p-3"
                 style={{ background: 'var(--green-soft)', borderColor: 'transparent' }}
@@ -1469,7 +1475,8 @@ function BulkImportForm({ onSave, onCancel }) {
                   </div>
                 )}
               </div>
-            ) : (
+            )}
+            {!defaultDeclined && !meta.indexFound && (
               <div
                 className="card mb-3 p-3"
                 style={{ background: 'var(--red-soft)', borderColor: 'transparent' }}
