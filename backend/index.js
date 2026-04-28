@@ -335,8 +335,12 @@ If NO daily summary is present (indexFound: false):
     - Different store / mismatched items / distant timestamps = different batches
     - When time and content disagree, content wins. Lean "same batch" if both are within reasonable bounds.
 
-Image timestamps (when each image was taken — note: timestamps are unreliable when the user takes all screenshots back-to-back at end of day):
+Image timestamps (when each image was taken — these can be a strong signal):
 ${tsLines.join('\n')}
+
+CLUSTERING BY TAKEN-AT: If two or more detail screenshots have takenAt timestamps within 60 seconds of each other, they almost certainly show DIFFERENT VIEWS of the SAME batch (the user typically scrolls a single Batch summary screen and takes 2 quick screenshots — top showing earnings, bottom showing journey + items). Assign all of them to the same batch's imageIndices, even if one of those screenshots doesn't itself contain a visible time anchor or store name. Use this rule to rescue screenshots that would otherwise be orphaned because they only show item lists or partial UI.
+
+EVERY DETAIL SCREENSHOT MUST BE ACCOUNTED FOR. After finalizing batches, every input image except the daily summary must appear in either a batch's imageIndices array or in unmatchedImages. Prefer to assign rather than leave dangling. If an image's content is unclear and you can't decisively match it, but its takenAt is within 60 seconds of a screenshot you already matched, attach it to that same batch.
 
 Per-batch field rules:
 

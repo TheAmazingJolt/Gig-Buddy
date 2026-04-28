@@ -1181,12 +1181,55 @@ function BulkImportForm({ onSave, onCancel }) {
         setProgress({ done: i + 1, total: chunks.length });
       }
 
+      // Orphan rescue: attach any input image the model never assigned (not in
+      // any batch's imageIndices, not in unmatchedImages, not the summary) to
+      // the nearest-by-takenAt batch. The user took these screenshots in pairs
+      // back-to-back; if one was missed, its closest neighbor in time almost
+      // certainly belongs to the same batch.
+      const summaryGlobalIdx = summaryShot ? shots.indexOf(summaryShot) + 1 : null;
+      const claimed = new Set();
+      for (const b of allBatches) (b.imageIndices || []).forEach(i => claimed.add(i));
+      for (const u of allUnmatched) claimed.add(u);
+      if (summaryGlobalIdx) claimed.add(summaryGlobalIdx);
+
+      const orphans = [];
+      for (let g = 1; g <= shots.length; g++) {
+        if (!claimed.has(g)) orphans.push(g);
+      }
+
+      const orphansStillUnmatched = [];
+      for (const orphanIdx of orphans) {
+        const orphanShot = shots[orphanIdx - 1];
+        const orphanT = Date.parse(orphanShot.takenAt);
+        // Find the batch whose existing image was taken closest in time.
+        let bestBatch = null;
+        let bestDelta = Infinity;
+        for (const b of allBatches) {
+          for (const claimedIdx of (b.imageIndices || [])) {
+            const claimedT = Date.parse(shots[claimedIdx - 1]?.takenAt);
+            const delta = Math.abs(orphanT - claimedT);
+            if (delta < bestDelta) {
+              bestDelta = delta;
+              bestBatch = b;
+            }
+          }
+        }
+        // Only auto-attach when the time gap is tight (<= 90s = same scroll session).
+        if (bestBatch && bestDelta <= 90_000) {
+          bestBatch.imageIndices = [...(bestBatch.imageIndices || []), orphanIdx];
+        } else {
+          orphansStillUnmatched.push(orphanIdx);
+        }
+      }
+
+      const finalUnmatched = Array.from(new Set([...allUnmatched, ...orphansStillUnmatched]));
+
       finishExtraction({
         batches: allBatches,
         indexFound,
         expectedCount,
-        summaryImageIndex: summaryShot ? shots.indexOf(summaryShot) + 1 : null,
-        unmatchedImages: Array.from(new Set(allUnmatched))
+        summaryImageIndex: summaryGlobalIdx,
+        unmatchedImages: finalUnmatched
       }, shots);
       setPhase('review');
     } catch (err) {
