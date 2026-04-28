@@ -74,6 +74,13 @@ const DECLINE_REASONS = [
   { val: 'other',           label: 'Other' }
 ];
 const DECLINE_REASON_LABELS = Object.fromEntries(DECLINE_REASONS.map(r => [r.val, r.label]));
+// Normalize a batch's declineReason field to an array. Old batches stored a single
+// string; new batches store an array; either reads cleanly here.
+const reasonList = (b) => {
+  const r = b.declineReason;
+  if (!r) return [];
+  return Array.isArray(r) ? r : [r];
+};
 
 // ──────────────────────────────────────────────────────────
 // Helpers
@@ -681,9 +688,9 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
                 {typeLabel}
               </span>
             )}
-            {!batch.accepted && batch.declineReason && (
+            {!batch.accepted && reasonList(batch).length > 0 && (
               <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                · {DECLINE_REASON_LABELS[batch.declineReason] || batch.declineReason}
+                · {reasonList(batch).map(r => DECLINE_REASON_LABELS[r] || r).join(' · ')}
               </span>
             )}
           </div>
@@ -1014,7 +1021,7 @@ function BulkImportForm({ onSave, onCancel }) {
           ...b,
           _accepted: isPostTrip ? true : !defaultDeclined,
           _kept: true,
-          _declineReason: null,
+          _declineReasons: [],
           _idx: i
         };
       });
@@ -1036,15 +1043,17 @@ function BulkImportForm({ onSave, onCancel }) {
     setCandidates(prev => prev.map(c => {
       if (c._idx !== idx) return c;
       const nextAccepted = !c._accepted;
-      // Clear the reason when flipping back to accepted, so it doesn't get saved.
-      return { ...c, _accepted: nextAccepted, _declineReason: nextAccepted ? null : c._declineReason };
+      // Clear the reasons when flipping back to accepted, so they don't get saved.
+      return { ...c, _accepted: nextAccepted, _declineReasons: nextAccepted ? [] : c._declineReasons };
     }));
   };
 
-  const setReason = (idx, reason) => {
-    setCandidates(prev => prev.map(c => c._idx === idx
-      ? { ...c, _declineReason: c._declineReason === reason ? null : reason }
-      : c));
+  const toggleReason = (idx, reason) => {
+    setCandidates(prev => prev.map(c => {
+      if (c._idx !== idx) return c;
+      const has = c._declineReasons.includes(reason);
+      return { ...c, _declineReasons: has ? c._declineReasons.filter(x => x !== reason) : [...c._declineReasons, reason] };
+    }));
   };
 
   const discard = (idx) => {
@@ -1108,7 +1117,7 @@ function BulkImportForm({ onSave, onCancel }) {
       orders: orders != null ? Math.round(orders) : 1,
       store: c.store || null,
       accepted: c._accepted,
-      declineReason: !c._accepted ? c._declineReason : null,
+      declineReason: !c._accepted && c._declineReasons.length ? c._declineReasons : null,
       notes: c.notes || null,
       source: 'bulk',
       images,
@@ -1349,19 +1358,22 @@ function BulkImportForm({ onSave, onCancel }) {
                     )}
                     {c._kept && !c._accepted && !isPostTrip && (
                       <div className="mt-3">
-                        <div className="uppercase-label mb-2">Decline reason</div>
+                        <div className="uppercase-label mb-2">Decline reasons (pick all that apply)</div>
                         <div className="flex flex-wrap gap-2">
-                          {DECLINE_REASONS.map(r => (
-                            <button
-                              key={r.val}
-                              type="button"
-                              onClick={() => setReason(c._idx, r.val)}
-                              className={`chip ${c._declineReason === r.val ? 'chip-active' : ''}`}
-                              style={{ fontSize: 12, padding: '6px 12px' }}
-                            >
-                              {r.label}
-                            </button>
-                          ))}
+                          {DECLINE_REASONS.map(r => {
+                            const active = c._declineReasons.includes(r.val);
+                            return (
+                              <button
+                                key={r.val}
+                                type="button"
+                                onClick={() => toggleReason(c._idx, r.val)}
+                                className={`chip ${active ? 'chip-active' : ''}`}
+                                style={{ fontSize: 12, padding: '6px 12px' }}
+                              >
+                                {r.label}
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -1437,7 +1449,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
   const [storeOther, setStoreOther] = useState('');
   const [notes, setNotes] = useState('');
   const [type, setType] = useState('shop_deliver');
-  const [declineReason, setDeclineReason] = useState(null);
+  const [declineReasons, setDeclineReasons] = useState([]);
   const [acceptedAt, setAcceptedAt] = useState(null);
   const [completedAt, setCompletedAt] = useState(null);
   const [fromSummary, setFromSummary] = useState(false); // set by extraction when screenType === 'summary'
@@ -1642,7 +1654,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
       orders: orders ? parseInt(orders) : 1,
       store: finalStore || null,
       accepted,
-      declineReason: !accepted ? declineReason : null,
+      declineReason: !accepted && declineReasons.length ? declineReasons : null,
       notes: notes || null,
       source: 'quick',
       images,
@@ -2007,18 +2019,21 @@ function LogForm({ onSave, onCancel, onBulk }) {
 
         {!fromSummary && (
           <div className="mt-5">
-            <div className="uppercase-label mb-2">Decline reason (if declining)</div>
+            <div className="uppercase-label mb-2">Decline reasons (if declining — pick all that apply)</div>
             <div className="flex flex-wrap gap-2">
-              {DECLINE_REASONS.map(r => (
-                <button
-                  key={r.val}
-                  type="button"
-                  onClick={() => setDeclineReason(declineReason === r.val ? null : r.val)}
-                  className={`chip ${declineReason === r.val ? 'chip-active' : ''}`}
-                >
-                  {r.label}
-                </button>
-              ))}
+              {DECLINE_REASONS.map(r => {
+                const active = declineReasons.includes(r.val);
+                return (
+                  <button
+                    key={r.val}
+                    type="button"
+                    onClick={() => setDeclineReasons(prev => active ? prev.filter(x => x !== r.val) : [...prev, r.val])}
+                    className={`chip ${active ? 'chip-active' : ''}`}
+                  >
+                    {r.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
@@ -2174,13 +2189,22 @@ function Insights({ batches }) {
       count: s.count
     }));
 
-    // Decline reasons — count per reason among declined batches in the filtered set
+    // Decline reasons — a batch can have multiple, so the per-reason counts may
+    // sum to more than the number of declined batches. Each rate is "fraction
+    // of declines tagged with this reason" and rates can sum > 100%.
     const reasonCounts = {};
-    filtered.filter(b => !b.accepted).forEach(b => {
-      const r = b.declineReason || 'unspecified';
-      reasonCounts[r] = (reasonCounts[r] || 0) + 1;
+    const declinedBatches = filtered.filter(b => !b.accepted);
+    declinedBatches.forEach(b => {
+      const reasons = reasonList(b);
+      if (reasons.length === 0) {
+        reasonCounts['unspecified'] = (reasonCounts['unspecified'] || 0) + 1;
+      } else {
+        reasons.forEach(r => {
+          reasonCounts[r] = (reasonCounts[r] || 0) + 1;
+        });
+      }
     });
-    const totalDeclined = Object.values(reasonCounts).reduce((a, b) => a + b, 0);
+    const totalDeclined = declinedBatches.length;
     const reasonStats = Object.entries(reasonCounts)
       .map(([reason, count]) => ({
         reason,
