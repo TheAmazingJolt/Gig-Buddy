@@ -1006,6 +1006,7 @@ function BulkImportForm({ onSave, onCancel }) {
         ...b,
         _accepted: true,
         _kept: true,
+        _declineReason: null,
         _idx: i
       }));
       setCandidates(prepared);
@@ -1023,7 +1024,18 @@ function BulkImportForm({ onSave, onCancel }) {
   };
 
   const toggleAccept = (idx) => {
-    setCandidates(prev => prev.map(c => c._idx === idx ? { ...c, _accepted: !c._accepted } : c));
+    setCandidates(prev => prev.map(c => {
+      if (c._idx !== idx) return c;
+      const nextAccepted = !c._accepted;
+      // Clear the reason when flipping back to accepted, so it doesn't get saved.
+      return { ...c, _accepted: nextAccepted, _declineReason: nextAccepted ? null : c._declineReason };
+    }));
+  };
+
+  const setReason = (idx, reason) => {
+    setCandidates(prev => prev.map(c => c._idx === idx
+      ? { ...c, _declineReason: c._declineReason === reason ? null : reason }
+      : c));
   };
 
   const discard = (idx) => {
@@ -1087,6 +1099,7 @@ function BulkImportForm({ onSave, onCancel }) {
       orders: orders != null ? Math.round(orders) : 1,
       store: c.store || null,
       accepted: c._accepted,
+      declineReason: !c._accepted ? c._declineReason : null,
       notes: c.notes || null,
       source: 'bulk',
       images,
@@ -1293,6 +1306,24 @@ function BulkImportForm({ onSave, onCancel }) {
                             style={{ height: 48, width: 'auto', borderRadius: 4, border: '1px solid var(--border-soft)' }}
                           />
                         ))}
+                      </div>
+                    )}
+                    {c._kept && !c._accepted && !isPostTrip && (
+                      <div className="mt-3">
+                        <div className="uppercase-label mb-2">Decline reason</div>
+                        <div className="flex flex-wrap gap-2">
+                          {DECLINE_REASONS.map(r => (
+                            <button
+                              key={r.val}
+                              type="button"
+                              onClick={() => setReason(c._idx, r.val)}
+                              className={`chip ${c._declineReason === r.val ? 'chip-active' : ''}`}
+                              style={{ fontSize: 12, padding: '6px 12px' }}
+                            >
+                              {r.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     )}
                     <div className="flex gap-2 mt-3">
