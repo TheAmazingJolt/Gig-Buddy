@@ -1158,6 +1158,11 @@ function BulkImportForm({ onSave, onCancel }) {
 
       const allBatches = [];
       const allUnmatched = [];
+      // The heuristic-picked summary plus whatever each chunk's response
+      // identifies as the summary — anything in this set must NEVER appear
+      // in a batch's imageIndices.
+      const summaryIndices = new Set();
+      if (summaryShot) summaryIndices.add(shots.indexOf(summaryShot) + 1);
       let indexFound = false;
       let expectedCount = 0;
 
@@ -1168,15 +1173,18 @@ function BulkImportForm({ onSave, onCancel }) {
 
         // Map chunk-local imageIndices (1-indexed in chunkShots) back to global
         // shots array indices so the review UI shows the right thumbnails.
-        // The summary's global index is NEVER allowed in a batch's imageIndices
-        // — the model occasionally puts it there by mistake, polluting the
-        // first batch's thumbnails with the daily summary screenshot.
+        // The model also reports its own summaryImageIndex — record that as a
+        // global index for stripping later. Anything in summaryIndices must
+        // NEVER appear in a batch's imageIndices.
         const chunkToGlobal = chunkShots.map(s => shots.indexOf(s) + 1);
-        const summaryGlobal = summaryShot ? shots.indexOf(summaryShot) + 1 : null;
+        if (Number.isFinite(result.summaryImageIndex)) {
+          const g = chunkToGlobal[result.summaryImageIndex - 1];
+          if (g) summaryIndices.add(g);
+        }
         const remappedBatches = result.batches.map(b => ({
           ...b,
           imageIndices: Array.isArray(b.imageIndices)
-            ? b.imageIndices.map(idx => chunkToGlobal[idx - 1]).filter(g => g && g !== summaryGlobal)
+            ? b.imageIndices.map(idx => chunkToGlobal[idx - 1]).filter(g => g && !summaryIndices.has(g))
             : []
         }));
 
@@ -1226,6 +1234,14 @@ function BulkImportForm({ onSave, onCancel }) {
         setProgress({ done: i + 1, total: chunks.length });
       }
 
+      // After all chunks have run, do a final sweep stripping any newly-
+      // discovered summary indices from batches saved earlier. (A summary
+      // index detected by chunk 3 won't have been stripped from a batch
+      // accumulated during chunk 1.) Also remove duplicate global indices.
+      for (const b of allBatches) {
+        b.imageIndices = Array.from(new Set((b.imageIndices || []).filter(g => !summaryIndices.has(g))));
+      }
+
       // Orphan rescue: attach any input image the model never assigned (not in
       // any batch's imageIndices, not in unmatchedImages, not the summary) to
       // the nearest-by-takenAt batch. The user took these screenshots in pairs
@@ -1235,6 +1251,9 @@ function BulkImportForm({ onSave, onCancel }) {
       const claimed = new Set();
       for (const b of allBatches) (b.imageIndices || []).forEach(i => claimed.add(i));
       for (const u of allUnmatched) claimed.add(u);
+      // All known summary indices count as "claimed" so the orphan rescue
+      // doesn't accidentally drag a daily-summary screenshot into some batch.
+      for (const idx of summaryIndices) claimed.add(idx);
       if (summaryGlobalIdx) claimed.add(summaryGlobalIdx);
 
       const orphans = [];
