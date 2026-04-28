@@ -1136,15 +1136,35 @@ function BulkImportForm({ onSave, onCancel }) {
         }));
 
         // Dedup against the running accumulator: if a daily-summary entry
-        // matched in two chunks, prefer the one with more source thumbnails.
+        // matched in multiple chunks, MERGE — union the image indices and
+        // fill in any fields the previous chunk couldn't see (e.g. one chunk
+        // had the offer screenshot with estMinutes, another had the summary
+        // with actualMinutes + journey timestamps).
+        const mergeFields = [
+          'pay', 'tipAmount', 'miles', 'mileLegs', 'items', 'units',
+          'estMinutes', 'actualMinutes', 'acceptedAt', 'completedAt',
+          'store', 'additionalStores', 'stops', 'orders', 'notes',
+          'screenType', 'type'
+        ];
         for (const b of remappedBatches) {
           const key = b.fromIndex && b.indexEntryTime ? b.indexEntryTime : null;
           if (key) {
             const existingIdx = allBatches.findIndex(x => x.fromIndex && x.indexEntryTime === key);
             if (existingIdx >= 0) {
-              if ((b.imageIndices || []).length > (allBatches[existingIdx].imageIndices || []).length) {
-                allBatches[existingIdx] = b;
+              const existing = allBatches[existingIdx];
+              const mergedIndices = Array.from(new Set([
+                ...(existing.imageIndices || []),
+                ...(b.imageIndices || [])
+              ]));
+              const merged = { ...existing, imageIndices: mergedIndices };
+              for (const f of mergeFields) {
+                // Only fill in if the existing version is missing/null and the new chunk has a value.
+                const empty = merged[f] == null || (Array.isArray(merged[f]) && merged[f].length === 0);
+                const incoming = b[f];
+                const has = incoming != null && !(Array.isArray(incoming) && incoming.length === 0);
+                if (empty && has) merged[f] = incoming;
               }
+              allBatches[existingIdx] = merged;
               continue;
             }
           }
