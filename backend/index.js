@@ -77,11 +77,28 @@ function reconcileMileage(obj) {
 function reconcileTimes(obj) {
   if (!obj || typeof obj !== 'object') return obj;
 
+  // Treat all journey timestamps as wall-clock local time. The model
+  // occasionally appends Z or a +offset to its ISO output, which Date.parse
+  // would then interpret as UTC. Strip those markers before parsing so we
+  // operate purely on wall-clock values. Re-emit in the same TZ-less form
+  // ("YYYY-MM-DDTHH:MM:SS") so the frontend displays it correctly too.
+  const stripTz = (s) => typeof s === 'string'
+    ? s.replace(/(?:[Zz]|[+-]\d{2}:?\d{2})$/, '')
+    : s;
+  const toLocalIso = (ms) => {
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
+
+  if (typeof obj.acceptedAt === 'string') obj.acceptedAt = stripTz(obj.acceptedAt);
+  if (typeof obj.completedAt === 'string') obj.completedAt = stripTz(obj.completedAt);
+
   // Forward derivation: acceptedAt + actualMinutes -> completedAt when missing.
   if (!obj.completedAt && obj.acceptedAt && obj.actualMinutes) {
     const start = Date.parse(obj.acceptedAt);
     if (!Number.isNaN(start)) {
-      obj.completedAt = new Date(start + Math.round(Number(obj.actualMinutes) * 60_000)).toISOString();
+      obj.completedAt = toLocalIso(start + Math.round(Number(obj.actualMinutes) * 60_000));
     }
   }
 
@@ -93,7 +110,7 @@ function reconcileTimes(obj) {
     const end = Date.parse(obj.completedAt);
     if (!Number.isNaN(end)) {
       const expectedStartMs = end - Math.round(Number(obj.actualMinutes) * 60_000);
-      const expectedIso = new Date(expectedStartMs).toISOString();
+      const expectedIso = toLocalIso(expectedStartMs);
       if (!obj.acceptedAt) {
         obj.acceptedAt = expectedIso;
       } else {
@@ -162,6 +179,7 @@ For TIME fields:
 For TIMELINE timestamps on summary screens, look at the journey timeline (the vertical list with location pins showing "Accepted: HH:MMam/pm Your location", "Arrival: HH:MMam/pm Store", "Drop off: HH:MMam/pm Order A", etc.):
   - "acceptedAt": ISO 8601 datetime built from the "Accepted: HH:MMam/pm" entry combined with the date visible on the screen. The screen header usually shows "Sunday, April 26, 5:44pm" or similar — use that date. On a daily summary screen the day is in the title (e.g., "Sun, Apr 26") and applies to every batch in that summary. Null if no acceptance time is visible.
   - "completedAt": ISO 8601 datetime built from the LAST "Drop off: HH:MMam/pm" entry combined with the date. For shop_only batches whose timeline ends at the store with no delivery legs, set null. Null if the batch hasn't completed.
+  - CRITICAL FORMAT RULE: do NOT include a timezone marker. Output WALL-CLOCK LOCAL TIME exactly as written on the screen. Format as "YYYY-MM-DDTHH:MM:SS" with no trailing Z, no +00:00, nothing. The user is in a US timezone and the on-screen times are local. If you write "T13:28:00Z" the consumer will display it 4-5 hours off because Z means UTC. "1:28pm" → "2026-04-28T13:28:00" (no Z).
 
 {
   "screenType": "offer" | "summary" | "item_detail" | "unknown",

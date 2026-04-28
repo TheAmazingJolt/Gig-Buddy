@@ -23,7 +23,13 @@ function mergeBatchSets(local, remote) {
 function parseTs(v) {
   if (v == null || v === '') return null;
   if (typeof v === 'number') return v > 0 ? v : null;
-  const ms = Date.parse(v);
+  // Instacart screen timestamps are ALWAYS wall-clock local time. The model
+  // sometimes appends "Z" or a +offset to its ISO output, which JS Date.parse
+  // would interpret as UTC and display 4-5 hours off in the user's local
+  // zone. Strip any trailing timezone marker so the parse treats the value
+  // as local wall-clock — matching the user's actual experience.
+  const stripped = String(v).replace(/(?:[Zz]|[+-]\d{2}:?\d{2})$/, '');
+  const ms = Date.parse(stripped);
   return Number.isNaN(ms) ? null : ms;
 }
 
