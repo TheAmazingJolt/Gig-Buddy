@@ -2504,6 +2504,7 @@ const TYPE_FILTERS = [
 
 function Insights({ batches }) {
   const [typeFilter, setTypeFilter] = useState('all');
+  const [showMoreBuckets, setShowMoreBuckets] = useState(false);
 
   const typeCounts = useMemo(() => {
     const counts = { shop_deliver: 0, shop_only: 0, delivery_only: 0, mixed: 0 };
@@ -2543,7 +2544,16 @@ function Insights({ batches }) {
       }))
       .sort((a, b) => (b.perHour || 0) - (a.perHour || 0));
 
-    const buckets = [
+    const buckets = showMoreBuckets ? [
+      { label: '< $10', min: 0, max: 10 },
+      { label: '$10–15', min: 10, max: 15 },
+      { label: '$15–20', min: 15, max: 20 },
+      { label: '$20–25', min: 20, max: 25 },
+      { label: '$25–30', min: 25, max: 30 },
+      { label: '$30–40', min: 30, max: 40 },
+      { label: '$40–50', min: 40, max: 50 },
+      { label: '$50+', min: 50, max: Infinity }
+    ] : [
       { label: '< $10', min: 0, max: 10 },
       { label: '$10–15', min: 10, max: 15 },
       { label: '$15–20', min: 15, max: 20 },
@@ -2602,7 +2612,7 @@ function Insights({ batches }) {
       .sort((a, b) => b.count - a.count);
 
     return { storeStats, bucketStats, dayStats, reasonStats, totalDeclined };
-  }, [filtered]);
+  }, [filtered, showMoreBuckets]);
 
   const FilterChips = () => (
     <div className="px-5 mb-4 flex gap-2 flex-wrap">
@@ -2706,8 +2716,11 @@ function Insights({ batches }) {
       <div className="px-5 mb-6">
         <div className="uppercase-label mb-3">Accept rate by pay</div>
         <div className="card p-4 space-y-3">
-          {insights.bucketStats.map(b => (
-            <div key={b.label}>
+          {insights.bucketStats.map((b, i) => (
+            <div
+              key={b.label}
+              className={i >= 6 ? 'fade-in' : ''}
+            >
               <div className="flex justify-between items-baseline mb-1">
                 <span style={{ fontSize: 14, fontWeight: 500 }}>{b.label}</span>
                 <span className="mono" style={{ fontSize: 13 }}>
@@ -2719,26 +2732,37 @@ function Insights({ batches }) {
               </div>
             </div>
           ))}
+          <button
+            type="button"
+            onClick={() => setShowMoreBuckets(v => !v)}
+            style={{
+              marginTop: 4, padding: '4px 0', background: 'none', border: 'none',
+              color: 'var(--accent)', fontSize: 12, fontWeight: 600,
+              cursor: 'pointer', fontFamily: 'inherit', alignSelf: 'flex-start'
+            }}
+          >
+            {showMoreBuckets ? 'Show fewer brackets' : 'Show more brackets ($30–40, $40–50, $50+)'}
+          </button>
         </div>
       </div>
 
       <div className="px-5 mb-6">
         <div className="uppercase-label mb-3">$/hr by day</div>
         <div className="card p-4">
-          <div className="flex items-end gap-2" style={{ height: 120 }}>
+          <div className="flex items-end gap-2" style={{ height: 200 }}>
             {insights.dayStats.map(d => (
-              <div key={d.day} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-                <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', width: '100%' }}>
+              <div key={d.day} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, height: '100%' }}>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', width: '100%', minHeight: 0 }}>
                   <div style={{
                     width: '100%',
-                    height: d.perHour ? `${(d.perHour / maxDay) * 100}%` : '2px',
+                    height: d.perHour ? `${Math.max(6, (d.perHour / maxDay) * 100)}%` : '4px',
                     background: d.perHour ? 'var(--accent)' : 'var(--border)',
-                    borderRadius: '4px 4px 0 0',
-                    minHeight: 2
+                    borderRadius: '6px 6px 0 0',
+                    transition: 'height 0.25s ease'
                   }} />
                 </div>
-                <div className="mono" style={{ fontSize: 10, color: 'var(--muted)' }}>{d.day}</div>
-                <div className="mono" style={{ fontSize: 10 }}>
+                <div className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>{d.day}</div>
+                <div className="mono" style={{ fontSize: 12, fontWeight: 600 }}>
                   {d.perHour ? `$${d.perHour.toFixed(0)}` : '—'}
                 </div>
               </div>
