@@ -148,11 +148,26 @@ async function loadBatches() {
   return [];
 }
 
+// localStorage on iOS Safari caps around ~5MB. With ~30-80KB of base64 image data
+// per batch, the cache overflows quickly. On QuotaExceededError, retry without the
+// images — the server keeps the full data and sync re-hydrates them on next load.
 async function saveBatches(batches) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(batches));
+    return;
   } catch (e) {
-    console.error('save failed', e);
+    const isQuota = e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);
+    if (!isQuota) {
+      console.error('save failed', e);
+      return;
+    }
+  }
+  try {
+    const slim = batches.map(b => b.images ? { ...b, images: null } : b);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
+    console.warn('localStorage full — saved without images; they will reload from server on next sync');
+  } catch (e2) {
+    console.error('save failed even without images', e2);
   }
 }
 
@@ -558,16 +573,21 @@ function MetricCard({ label, value, sub }) {
 }
 
 function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
-  const [rangeFilter, setRangeFilter] = useState('week'); // 'week' | 'month' | 'year'
+  const [rangeFilter, setRangeFilter] = useState('week'); // 'day' | 'week' | 'month' | 'year'
   const RANGES = [
+    { val: 'day',   label: 'Day',   days: 1 },
     { val: 'week',  label: 'Week',  days: 7 },
     { val: 'month', label: 'Month', days: 30 },
     { val: 'year',  label: 'Year',  days: 365 }
   ];
-  const rangeDays = (RANGES.find(r => r.val === rangeFilter) || RANGES[0]).days;
+  const rangeDays = (RANGES.find(r => r.val === rangeFilter) || RANGES[1]).days;
 
   const stats = useMemo(() => {
-    const since = Date.now() - rangeDays * 24 * 60 * 60 * 1000;
+    // Day uses calendar boundary (today since midnight) to match the daily header;
+    // Week / Month / Year use rolling lookbacks ("how am I doing lately").
+    const since = rangeFilter === 'day'
+      ? new Date(new Date().setHours(0, 0, 0, 0)).getTime()
+      : Date.now() - rangeDays * 24 * 60 * 60 * 1000;
     const inRange = batches.filter(b => batchTime(b) >= since);
     const accepted = inRange.filter(b => b.accepted);
     const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
@@ -583,7 +603,7 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
       count: accepted.length,
       offered: inRange.length
     };
-  }, [batches, rangeDays]);
+  }, [batches, rangeFilter, rangeDays]);
 
   const recent = batches.slice(0, 5);
 
@@ -605,7 +625,7 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
               </button>
             ))}
           </div>
-          <div className="uppercase-label">Last {rangeDays} days</div>
+          <div className="uppercase-label">{rangeFilter === 'day' ? 'Today' : `Last ${rangeDays} days`}</div>
         </div>
         <div className="card-ink p-5 mb-4">
           <div className="flex items-baseline justify-between">
