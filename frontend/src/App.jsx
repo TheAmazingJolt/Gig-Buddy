@@ -112,7 +112,11 @@ const actualPerHour = (b) => {
   return b.actualPay / (mins / 60);
 };
 // When a batch happened in the world, falling back to logged time when we don't know.
-const batchTime = (b) => b.acceptedAt || b.loggedAt || 0;
+// Preference: the IC-recorded acceptance time > the screenshot's iOS capture time
+// > when the user pressed save. Most relevant for declined batches that have no
+// acceptedAt but were captured via screenshot — the iOS capture time is ~when
+// the offer came in, much closer to truth than the bulk-upload moment.
+const batchTime = (b) => b.acceptedAt || b.screenshotTakenAt || b.loggedAt || 0;
 
 const dayName = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday: 'short' });
 const hourOf = (ts) => new Date(ts).getHours();
@@ -240,7 +244,7 @@ const Theme = () => (
       background: var(--bg);
       color: var(--ink);
       min-height: 100vh;
-      padding-bottom: 80px;
+      padding-bottom: calc(env(safe-area-inset-bottom, 0) + 110px);
       -webkit-font-smoothing: antialiased;
     }
 
@@ -722,6 +726,8 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
                 {fmtDate(batch.acceptedAt)} · {fmtTime(batch.acceptedAt)}
                 {batch.completedAt && <>{' – '}{fmtTime(batch.completedAt)}</>}
               </>
+            ) : batch.screenshotTakenAt ? (
+              <>{fmtDate(batch.screenshotTakenAt)} · {fmtTime(batch.screenshotTakenAt)}</>
             ) : (
               <>{fmtDate(batch.loggedAt)} · {fmtTime(batch.loggedAt)}</>
             )}
@@ -1115,17 +1121,23 @@ function BulkImportForm({ onSave, onCancel }) {
 
     const sourceShots = (c.imageindices || []).map(i => shots[i - 1]).filter(Boolean);
     let images = null;
+    let screenshotTakenAt = null;
     if (sourceShots.length) {
       try {
         images = await Promise.all(sourceShots.map(s => downscaleImage(s.dataUrl)));
       } catch (e) {
         console.error('image downscale failed', e);
       }
+      const tsList = sourceShots
+        .map(s => Date.parse(s.takenAt))
+        .filter(n => Number.isFinite(n) && n > 0);
+      if (tsList.length) screenshotTakenAt = Math.min(...tsList);
     }
 
     return {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
+      screenshotTakenAt,
       acceptedAt: parseTs(c.acceptedat ?? c.accepted_at),
       completedAt: parseTs(c.completedat ?? c.completed_at),
       type: type || 'shop_deliver',
@@ -1651,6 +1663,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
                        (actualMinutes !== '' && !isNaN(parseFloat(actualMinutes)));
 
     let images = null;
+    let screenshotTakenAt = null;
     if (shots.length) {
       try {
         const compressed = await Promise.all(shots.map(s => downscaleImage(s.dataUrl)));
@@ -1658,11 +1671,16 @@ function LogForm({ onSave, onCancel, onBulk }) {
       } catch (e) {
         console.error('image downscale failed', e);
       }
+      const tsList = shots
+        .map(s => Date.parse(s.takenAt))
+        .filter(n => Number.isFinite(n) && n > 0);
+      if (tsList.length) screenshotTakenAt = Math.min(...tsList);
     }
 
     const batch = {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
+      screenshotTakenAt,
       acceptedAt: acceptedAt,
       completedAt: completedAt,
       type,
