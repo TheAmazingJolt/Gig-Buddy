@@ -66,14 +66,18 @@ const DEFAULT_STORES = [
 ];
 
 const DECLINE_REASONS = [
-  { val: 'too_far',         label: 'Too far' },
-  { val: 'pay_low',         label: 'Pay too low' },
-  { val: 'too_many_items',  label: 'Too many items' },
-  { val: 'bad_time',        label: 'Bad time' },
-  { val: 'cherry_pick',     label: 'Cherry-pick' },
-  { val: 'other',           label: 'Other' }
+  { val: 'too_far_to_store',  label: 'Too far to store' },
+  { val: 'delivery_too_far',  label: 'Delivery too far' },
+  { val: 'pay_low',           label: 'Pay too low' },
+  { val: 'too_many_items',    label: 'Too many items' },
+  { val: 'bad_time',          label: 'Bad time' },
+  { val: 'cherry_pick',       label: 'Cherry-pick' },
+  { val: 'other',             label: 'Other' }
 ];
-const DECLINE_REASON_LABELS = Object.fromEntries(DECLINE_REASONS.map(r => [r.val, r.label]));
+const DECLINE_REASON_LABELS = {
+  ...Object.fromEntries(DECLINE_REASONS.map(r => [r.val, r.label])),
+  too_far: 'Too far' // legacy single-bucket reason from earlier batches
+};
 // Normalize a batch's declineReason field to an array. Old batches stored a single
 // string; new batches store an array; either reads cleanly here.
 const reasonList = (b) => {
@@ -733,7 +737,9 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
             )}
           </div>
           <div className="display" style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.2 }}>
-            {fmt$(batch.pay)} <span style={{ color: 'var(--muted)', fontSize: 15, fontWeight: 400 }}>· {batch.store || '—'}</span>
+            {fmt$(batch.pay)} <span style={{ color: 'var(--muted)', fontSize: 15, fontWeight: 400 }}>· {batch.store || '—'}{Array.isArray(batch.additionalStores) && batch.additionalStores.length > 0 && (
+              <> + {batch.additionalStores.join(' + ')}</>
+            )}</span>
           </div>
           <div className="mono mt-1" style={{ fontSize: 12, color: 'var(--muted)' }}>
             {batch.miles != null && <>{milesLabel}</>}
@@ -1150,6 +1156,7 @@ function BulkImportForm({ onSave, onCancel }) {
       stops: stops != null ? Math.round(stops) : 1,
       orders: orders != null ? Math.round(orders) : 1,
       store: c.store || null,
+      additionalStores: Array.isArray(c.additionalstores) && c.additionalstores.length ? c.additionalstores.map(String) : null,
       accepted: c._accepted,
       declineReason: !c._accepted && c._declineReasons.length ? c._declineReasons : null,
       notes: c.notes || null,
@@ -1481,6 +1488,8 @@ function LogForm({ onSave, onCancel, onBulk }) {
   const [orders, setOrders] = useState('1');
   const [store, setStore] = useState('');
   const [storeOther, setStoreOther] = useState('');
+  const [additionalStores, setAdditionalStores] = useState([]);
+  const [showMultiStore, setShowMultiStore] = useState(false);
   const [notes, setNotes] = useState('');
   const [type, setType] = useState('shop_deliver');
   const [declineReasons, setDeclineReasons] = useState([]);
@@ -1556,6 +1565,17 @@ function LogForm({ onSave, onCancel, onBulk }) {
       const match = DEFAULT_STORES.find(s => s.toLowerCase() === String(storeName).toLowerCase());
       if (match) { setStore(match); setStoreOther(''); }
       else { setStore('Other'); setStoreOther(String(storeName)); }
+    }
+
+    const extras = data.additionalstores ?? data.additional_stores;
+    if (Array.isArray(extras) && extras.length) {
+      const mapped = extras
+        .map(name => DEFAULT_STORES.find(s => s.toLowerCase() === String(name).toLowerCase()) || String(name))
+        .filter(Boolean);
+      if (mapped.length) {
+        setAdditionalStores(mapped);
+        setShowMultiStore(true);
+      }
     }
 
     if (data.notes) setNotes(String(data.notes));
@@ -1693,6 +1713,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
       stops: stops ? parseInt(stops) : 1,
       orders: orders ? parseInt(orders) : 1,
       store: finalStore || null,
+      additionalStores: additionalStores.length ? additionalStores : null,
       accepted,
       declineReason: !accepted && declineReasons.length ? declineReasons : null,
       notes: notes || null,
@@ -1912,6 +1933,48 @@ function LogForm({ onSave, onCancel, onBulk }) {
                 value={storeOther}
                 onChange={e => setStoreOther(e.target.value)}
               />
+            )}
+
+            {!showMultiStore ? (
+              <button
+                type="button"
+                onClick={() => setShowMultiStore(true)}
+                style={{
+                  marginTop: 8, padding: 0, background: 'none', border: 'none',
+                  color: 'var(--accent)', fontSize: 12, fontWeight: 600,
+                  cursor: 'pointer', fontFamily: 'inherit'
+                }}
+              >
+                + Multi-store batch
+              </button>
+            ) : (
+              <div className="mt-3">
+                <div className="flex items-baseline justify-between mb-2">
+                  <div className="uppercase-label">Additional stores</div>
+                  <button
+                    type="button"
+                    onClick={() => { setShowMultiStore(false); setAdditionalStores([]); }}
+                    style={{ background: 'none', border: 'none', color: 'var(--muted)', fontSize: 11, cursor: 'pointer', fontFamily: 'inherit' }}
+                  >
+                    Clear
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {DEFAULT_STORES.filter(s => s !== 'Other' && s !== store).map(s => {
+                    const active = additionalStores.includes(s);
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setAdditionalStores(prev => active ? prev.filter(x => x !== s) : [...prev, s])}
+                        className={`chip ${active ? 'chip-active' : ''}`}
+                      >
+                        {s}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             )}
           </div>
 

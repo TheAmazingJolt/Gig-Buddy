@@ -148,7 +148,8 @@ For TIMELINE timestamps on summary screens, look at the journey timeline (the ve
   "actualMinutes": number — set ONLY on summary screens (from "Active hours"),
   "acceptedAt": ISO 8601 datetime string — from journey "Accepted: HH:MMam/pm" + screen date,
   "completedAt": ISO 8601 datetime string — from last "Drop off: HH:MMam/pm" + screen date, or null for shop-only,
-  "store": string,
+  "store": string — primary store name. For multi-store batches, this is the FIRST store the shopper visits.,
+  "additionalStores": array of strings — any OTHER stores the shopper visits on the same batch, in journey order. Multi-stage offers ("Stage 1 / Stage 2") and offer maps with distinct store pins from different chains (e.g. Dollar Tree + Target, Publix + CVS) populate this. Empty array or null when only one store is involved.,
   "stops": number — physical destinations,
   "orders": number — customer/order count,
   "notes": string — guaranteed earnings note, mixed-batch breakdown, anything else worth keeping
@@ -359,6 +360,7 @@ Return ONLY a valid JSON object — no markdown, no code fences, no prose:
       "acceptedAt": string | null,    // ISO 8601, from journey "Accepted: HH:MMam/pm" + date
       "completedAt": string | null,   // ISO 8601, from last "Drop off: HH:MMam/pm" + date
       "store": string | null,
+      "additionalStores": [string, ...],
       "stops": number,
       "orders": number,
       "notes": string | null,
