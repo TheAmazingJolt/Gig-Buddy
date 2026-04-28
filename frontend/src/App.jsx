@@ -550,24 +550,32 @@ function MetricCard({ label, value, sub }) {
 }
 
 function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
+  const [rangeFilter, setRangeFilter] = useState('week'); // 'week' | 'month' | 'year'
+  const RANGES = [
+    { val: 'week',  label: 'Week',  days: 7 },
+    { val: 'month', label: 'Month', days: 30 },
+    { val: 'year',  label: 'Year',  days: 365 }
+  ];
+  const rangeDays = (RANGES.find(r => r.val === rangeFilter) || RANGES[0]).days;
+
   const stats = useMemo(() => {
-    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const weekBatches = batches.filter(b => batchTime(b) >= weekAgo);
-    const accepted = weekBatches.filter(b => b.accepted);
+    const since = Date.now() - rangeDays * 24 * 60 * 60 * 1000;
+    const inRange = batches.filter(b => batchTime(b) >= since);
+    const accepted = inRange.filter(b => b.accepted);
     const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
     const totalMin = accepted.reduce((s, b) => s + (bestMinutes(b) || 0), 0);
     const totalMiles = accepted.reduce((s, b) => s + (b.miles || 0), 0);
 
     return {
-      acceptRate: weekBatches.length ? (accepted.length / weekBatches.length) * 100 : null,
+      acceptRate: inRange.length ? (accepted.length / inRange.length) * 100 : null,
       perHour: totalMin ? totalPay / (totalMin / 60) : null,
       perMile: totalMiles ? totalPay / totalMiles : null,
       totalPay,
       totalMiles,
       count: accepted.length,
-      offered: weekBatches.length
+      offered: inRange.length
     };
-  }, [batches]);
+  }, [batches, rangeDays]);
 
   const recent = batches.slice(0, 5);
 
@@ -576,7 +584,21 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
       <Header batches={batches} syncStatus={syncStatus} />
 
       <div className="px-5">
-        <div className="uppercase-label mb-2">Last 7 days</div>
+        <div className="flex items-baseline justify-between mb-2">
+          <div className="flex gap-2">
+            {RANGES.map(r => (
+              <button
+                key={r.val}
+                onClick={() => setRangeFilter(r.val)}
+                className={`chip ${rangeFilter === r.val ? 'chip-active' : ''}`}
+                style={{ padding: '6px 14px', fontSize: 13 }}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+          <div className="uppercase-label">Last {rangeDays} days</div>
+        </div>
         <div className="card-ink p-5 mb-4">
           <div className="flex items-baseline justify-between">
             <div>
