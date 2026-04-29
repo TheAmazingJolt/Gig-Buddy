@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import Anthropic from '@anthropic-ai/sdk';
 import pg from 'pg';
 
@@ -38,19 +40,89 @@ async function initDb() {
       updated_at  BIGINT NOT NULL DEFAULT 0
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id            TEXT PRIMARY KEY,
+      email         TEXT UNIQUE NOT NULL,
+      password_hash TEXT,
+      created_at    BIGINT NOT NULL,
+      updated_at    BIGINT NOT NULL DEFAULT 0
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token       TEXT PRIMARY KEY,
+      user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at  BIGINT NOT NULL,
+      expires_at  BIGINT NOT NULL
+    )
+  `);
+  await pool.query(`ALTER TABLE batches  ADD COLUMN IF NOT EXISTS user_id TEXT`);
+  await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS user_id TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS batches_user_idx  ON batches(user_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS expenses_user_idx ON expenses(user_id)`);
   console.log('db schema ready');
 }
 
-// Auth — single shared bearer token, set as API_TOKEN on the server and VITE_API_TOKEN on the client.
-const API_TOKEN = process.env.API_TOKEN;
-function requireAuth(req, res, next) {
-  if (!API_TOKEN) {
-    return res.status(500).json({ error: 'API_TOKEN not configured on server' });
-  }
+// Auth — per-user accounts backed by Postgres users + sessions tables.
+// Bearer token in the Authorization header is an opaque random string that
+// keys into sessions(token). Old API_TOKEN env var is gone; existing data
+// gets claimed by the first user to sign up via bootstrap below.
+
+const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+const PASSWORD_MIN = 8;
+
+async function requireUser(req, res, next) {
+  if (!pool) return res.status(503).json({ error: 'Database not configured (DATABASE_URL missing)' });
   const header = req.header('authorization') || '';
   const token = header.replace(/^Bearer\s+/i, '').trim();
-  if (token !== API_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
-  next();
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const r = await pool.query(
+      `SELECT s.user_id, s.expires_at, u.email
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+        WHERE s.token = $1`,
+      [token]
+    );
+    if (!r.rowCount) return res.status(401).json({ error: 'Unauthorized' });
+    const row = r.rows[0];
+    if (Number(row.expires_at) < Date.now()) {
+      // Best-effort cleanup; ignore failure.
+      pool.query('DELETE FROM sessions WHERE token = $1', [token]).catch(() => {});
+      return res.status(401).json({ error: 'Session expired' });
+    }
+    req.user = { id: row.user_id, email: row.email };
+    next();
+  } catch (e) {
+    console.error('requireUser:', e);
+    res.status(500).json({ error: e.message });
+  }
+}
+
+async function issueSession(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const now = Date.now();
+  await pool.query(
+    `INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)`,
+    [token, userId, now, now + SESSION_TTL_MS]
+  );
+  return token;
+}
+
+function normalizeEmail(s) {
+  return String(s || '').trim().toLowerCase();
+}
+
+// First-signup migration: anonymous data (rows with user_id IS NULL) was
+// created under the legacy shared-token model. Whoever signs up first
+// claims it. Subsequent signups start with an empty workspace.
+async function maybeClaimAnonymousData(userId) {
+  const r = await pool.query('SELECT COUNT(*) AS c FROM users');
+  const userCount = Number(r.rows[0]?.c || 0);
+  if (userCount !== 1) return; // only the very first user claims
+  await pool.query('UPDATE batches  SET user_id = $1 WHERE user_id IS NULL', [userId]);
+  await pool.query('UPDATE expenses SET user_id = $1 WHERE user_id IS NULL', [userId]);
 }
 
 function requireDb(req, res, next) {
@@ -215,16 +287,84 @@ app.get('/', (req, res) => {
     service: 'batch-extractor',
     model: MODEL,
     db: !!pool,
-    auth: !!API_TOKEN
+    auth: 'session'
   });
 });
 
-// ── Batches CRUD ──────────────────────────────────────────────────
-// All /batches routes require Bearer auth and a configured DB.
+// ── Auth ──────────────────────────────────────────────────────────
 
-app.get('/batches', requireAuth, requireDb, async (req, res) => {
+app.post('/auth/signup', requireDb, async (req, res) => {
   try {
-    const r = await pool.query('SELECT data FROM batches ORDER BY logged_at DESC');
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || '');
+    if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required' });
+    if (password.length < PASSWORD_MIN) return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN} characters` });
+
+    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existing.rowCount) return res.status(409).json({ error: 'An account with that email already exists' });
+
+    const id = crypto.randomUUID();
+    const now = Date.now();
+    const password_hash = await bcrypt.hash(password, 10);
+    await pool.query(
+      `INSERT INTO users (id, email, password_hash, created_at, updated_at) VALUES ($1, $2, $3, $4, $4)`,
+      [id, email, password_hash, now]
+    );
+    await maybeClaimAnonymousData(id);
+    const token = await issueSession(id);
+    res.json({ token, user: { id, email } });
+  } catch (e) {
+    console.error('POST /auth/signup:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/auth/login', requireDb, async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || '');
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
+    const r = await pool.query('SELECT id, password_hash FROM users WHERE email = $1', [email]);
+    const row = r.rows[0];
+    // Constant-time-ish: always do a hash compare even if user doesn't exist.
+    const hash = row?.password_hash || '$2a$10$invalidsaltinvalidsaltinvalidsaltinvalidsaltinvalidsa';
+    const match = await bcrypt.compare(password, hash);
+    if (!row || !match) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const token = await issueSession(row.id);
+    res.json({ token, user: { id: row.id, email } });
+  } catch (e) {
+    console.error('POST /auth/login:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/auth/logout', requireUser, async (req, res) => {
+  try {
+    const header = req.header('authorization') || '';
+    const token = header.replace(/^Bearer\s+/i, '').trim();
+    if (token) await pool.query('DELETE FROM sessions WHERE token = $1', [token]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('POST /auth/logout:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/auth/me', requireUser, (req, res) => {
+  res.json({ user: req.user });
+});
+
+// ── Batches CRUD ──────────────────────────────────────────────────
+// Per-user; queries scoped by req.user.id.
+
+app.get('/batches', requireUser, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT data FROM batches WHERE user_id = $1 ORDER BY logged_at DESC',
+      [req.user.id]
+    );
     res.json({ batches: r.rows.map(row => row.data) });
   } catch (e) {
     console.error('GET /batches:', e);
@@ -232,7 +372,7 @@ app.get('/batches', requireAuth, requireDb, async (req, res) => {
   }
 });
 
-app.put('/batches/:id', requireAuth, requireDb, async (req, res) => {
+app.put('/batches/:id', requireUser, async (req, res) => {
   try {
     const { id } = req.params;
     const data = req.body;
@@ -241,14 +381,21 @@ app.put('/batches/:id', requireAuth, requireDb, async (req, res) => {
     }
     const loggedAt = Number(data.loggedAt) || Date.now();
     const updatedAt = Number(data.updatedAt) || Date.now();
+    // Ownership check: if this batch already exists, it must belong to the
+    // current user. Prevents one user from clobbering another's row by id.
+    const existing = await pool.query('SELECT user_id FROM batches WHERE id = $1', [id]);
+    if (existing.rowCount && existing.rows[0].user_id && existing.rows[0].user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     await pool.query(
-      `INSERT INTO batches (id, data, logged_at, updated_at)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO batches (id, data, logged_at, updated_at, user_id)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE
          SET data = EXCLUDED.data,
              logged_at = EXCLUDED.logged_at,
-             updated_at = EXCLUDED.updated_at`,
-      [id, data, loggedAt, updatedAt]
+             updated_at = EXCLUDED.updated_at,
+             user_id = EXCLUDED.user_id`,
+      [id, data, loggedAt, updatedAt, req.user.id]
     );
     res.json({ ok: true });
   } catch (e) {
@@ -257,9 +404,9 @@ app.put('/batches/:id', requireAuth, requireDb, async (req, res) => {
   }
 });
 
-app.delete('/batches/:id', requireAuth, requireDb, async (req, res) => {
+app.delete('/batches/:id', requireUser, async (req, res) => {
   try {
-    await pool.query('DELETE FROM batches WHERE id = $1', [req.params.id]);
+    await pool.query('DELETE FROM batches WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
     res.json({ ok: true });
   } catch (e) {
     console.error('DELETE /batches/:id:', e);
@@ -270,9 +417,12 @@ app.delete('/batches/:id', requireAuth, requireDb, async (req, res) => {
 // ── Expenses CRUD ────────────────────────────────────────────────
 // Same shape and auth as /batches. Tracks gas, maintenance, food, etc.
 
-app.get('/expenses', requireAuth, requireDb, async (req, res) => {
+app.get('/expenses', requireUser, async (req, res) => {
   try {
-    const r = await pool.query('SELECT data FROM expenses ORDER BY occurred_at DESC');
+    const r = await pool.query(
+      'SELECT data FROM expenses WHERE user_id = $1 ORDER BY occurred_at DESC',
+      [req.user.id]
+    );
     res.json({ expenses: r.rows.map(row => row.data) });
   } catch (e) {
     console.error('GET /expenses:', e);
@@ -280,7 +430,7 @@ app.get('/expenses', requireAuth, requireDb, async (req, res) => {
   }
 });
 
-app.put('/expenses/:id', requireAuth, requireDb, async (req, res) => {
+app.put('/expenses/:id', requireUser, async (req, res) => {
   try {
     const { id } = req.params;
     const data = req.body;
@@ -289,14 +439,19 @@ app.put('/expenses/:id', requireAuth, requireDb, async (req, res) => {
     }
     const occurredAt = Number(data.occurredAt) || Date.now();
     const updatedAt = Number(data.updatedAt) || Date.now();
+    const existing = await pool.query('SELECT user_id FROM expenses WHERE id = $1', [id]);
+    if (existing.rowCount && existing.rows[0].user_id && existing.rows[0].user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     await pool.query(
-      `INSERT INTO expenses (id, data, occurred_at, updated_at)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO expenses (id, data, occurred_at, updated_at, user_id)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE
          SET data = EXCLUDED.data,
              occurred_at = EXCLUDED.occurred_at,
-             updated_at = EXCLUDED.updated_at`,
-      [id, data, occurredAt, updatedAt]
+             updated_at = EXCLUDED.updated_at,
+             user_id = EXCLUDED.user_id`,
+      [id, data, occurredAt, updatedAt, req.user.id]
     );
     res.json({ ok: true });
   } catch (e) {
@@ -305,9 +460,9 @@ app.put('/expenses/:id', requireAuth, requireDb, async (req, res) => {
   }
 });
 
-app.delete('/expenses/:id', requireAuth, requireDb, async (req, res) => {
+app.delete('/expenses/:id', requireUser, async (req, res) => {
   try {
-    await pool.query('DELETE FROM expenses WHERE id = $1', [req.params.id]);
+    await pool.query('DELETE FROM expenses WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
     res.json({ ok: true });
   } catch (e) {
     console.error('DELETE /expenses/:id:', e);
@@ -315,7 +470,7 @@ app.delete('/expenses/:id', requireAuth, requireDb, async (req, res) => {
   }
 });
 
-app.post('/extract', async (req, res) => {
+app.post('/extract', requireUser, async (req, res) => {
   try {
     const { images } = req.body;
     if (!Array.isArray(images) || images.length === 0) {
@@ -375,7 +530,7 @@ app.post('/extract', async (req, res) => {
 // body: { images: [{ data, mediaType, takenAt: ISOString }] }
 // returns: { ok: true, batches: [{ ...fields, imageIndices: [1,2,...] }] }
 
-app.post('/extract-multi', async (req, res) => {
+app.post('/extract-multi', requireUser, async (req, res) => {
   try {
     const { images } = req.body;
     if (!Array.isArray(images) || images.length === 0) {

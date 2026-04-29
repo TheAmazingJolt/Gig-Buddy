@@ -1,25 +1,52 @@
-// Tiny API client for the batches sync endpoints. The frontend keeps localStorage
-// as a synchronous primary cache; this module handles the durable Postgres-backed
-// copy living on the Railway backend. Every call requires the Bearer token.
+// Tiny API client. The auth token is per-user, issued by /auth/login or
+// /auth/signup, and stored in localStorage. authedFetch reads it on every
+// call; if there's no token (or the server returns 401), the UI bumps the
+// user back to the AuthForm and clears the cache.
 
-const TOKEN = import.meta.env.VITE_API_TOKEN;
 const BASE = (import.meta.env.VITE_EXTRACTOR_URL || '').replace(/\/$/, '');
+const TOKEN_KEY = 'batchwise:authToken';
 
-export const apiEnabled = () => Boolean(TOKEN && BASE);
+let cachedToken = null;
+try { cachedToken = localStorage.getItem(TOKEN_KEY); } catch { /* ignore */ }
+
+export function getAuthToken() {
+  return cachedToken;
+}
+
+export function setAuthToken(token) {
+  cachedToken = token || null;
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch { /* ignore */ }
+}
+
+export const apiEnabled = () => Boolean(cachedToken && BASE);
+export const baseUrl = () => BASE;
 
 async function authedFetch(path, opts = {}) {
-  if (!apiEnabled()) throw new Error('API not configured');
+  if (!BASE) throw new Error('Server URL is not configured');
+  if (!cachedToken) throw new Error('Not signed in');
   const res = await fetch(BASE + path, {
     ...opts,
     headers: {
       ...(opts.headers || {}),
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${TOKEN}`
+      Authorization: `Bearer ${cachedToken}`
     }
   });
+  if (res.status === 401) {
+    // Session expired or token invalidated server-side. Clear and surface.
+    setAuthToken(null);
+    const err = new Error('Session expired — please sign in again');
+    err.status = 401;
+    throw err;
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    const err = new Error(body.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }
@@ -58,14 +85,63 @@ export const expensesApi = {
   }
 };
 
-// Extraction endpoints are not auth-gated, but they live on the same backend.
+export const auth = {
+  async signup(email, password) {
+    if (!BASE) throw new Error('Server URL is not configured');
+    const res = await fetch(BASE + '/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    setAuthToken(body.token);
+    return body.user;
+  },
+  async login(email, password) {
+    if (!BASE) throw new Error('Server URL is not configured');
+    const res = await fetch(BASE + '/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    setAuthToken(body.token);
+    return body.user;
+  },
+  async logout() {
+    if (!cachedToken) return;
+    try {
+      await authedFetch('/auth/logout', { method: 'POST' });
+    } catch (e) {
+      // Even if the server rejects, drop local token so the UI doesn't get stuck.
+      console.warn('logout call failed; clearing local token anyway', e);
+    }
+    setAuthToken(null);
+  },
+  async me() {
+    return (await authedFetch('/auth/me')).user;
+  }
+};
+
 export async function extractMulti(images) {
   if (!BASE) throw new Error('VITE_EXTRACTOR_URL is not set');
+  if (!cachedToken) throw new Error('Not signed in');
   const res = await fetch(BASE + '/extract-multi', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${cachedToken}`
+    },
     body: JSON.stringify({ images })
   });
+  if (res.status === 401) {
+    setAuthToken(null);
+    const err = new Error('Session expired — please sign in again');
+    err.status = 401;
+    throw err;
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.ok) {
     throw new Error(json.error || `Extraction failed (HTTP ${res.status})`);

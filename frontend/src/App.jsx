@@ -4,7 +4,7 @@ import {
   Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff,
   DollarSign, Settings as SettingsIcon, Download, Upload
 } from 'lucide-react';
-import { api, expensesApi, extractMulti } from './api';
+import { api, expensesApi, extractMulti, auth, getAuthToken, setAuthToken } from './api';
 import { getImages, setImages, deleteImages } from './imageStore';
 
 const EXTRACTOR_URL = import.meta.env.VITE_EXTRACTOR_URL;
@@ -2471,12 +2471,21 @@ function LogForm({ onSave, onCancel, onBulk }) {
         const comma = dataUrl.indexOf(',');
         return { data: dataUrl.slice(comma + 1), mediaType: 'image/jpeg' };
       }));
+      const token = getAuthToken();
+      if (!token) throw new Error('Not signed in');
       const url = EXTRACTOR_URL.replace(/\/$/, '') + '/extract';
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
         body: JSON.stringify({ images: compressed })
       });
+      if (res.status === 401) {
+        setAuthToken(null);
+        throw new Error('Session expired — please sign in again');
+      }
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.ok) {
         throw new Error(json?.error || `Extraction failed (HTTP ${res.status})`);
@@ -3044,7 +3053,7 @@ const TYPE_FILTERS = [
 // Expense components
 // ──────────────────────────────────────────────────────────
 
-function SettingsModal({ batches, expenses, onCancel, onImported }) {
+function SettingsModal({ batches, expenses, user, onCancel, onImported, onSignOut }) {
   const [busy, setBusy] = useState(null); // 'export' | 'import' | null
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
@@ -3131,6 +3140,19 @@ function SettingsModal({ batches, expenses, onCancel, onImported }) {
       </div>
 
       <div className="px-5">
+        {user && (
+          <div className="card p-4 mb-4">
+            <div className="uppercase-label mb-2">Account</div>
+            <div style={{ fontSize: 14, color: 'var(--ink)', fontWeight: 600 }}>{user.email}</div>
+            <button
+              onClick={onSignOut}
+              className="btn-ghost mt-3"
+              style={{ width: '100%', color: 'var(--red)', borderColor: 'var(--red-soft)' }}
+            >
+              Sign out
+            </button>
+          </div>
+        )}
         <div className="card p-4 mb-4">
           <div className="uppercase-label mb-2">Backup &amp; transfer</div>
           <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4, marginBottom: 12 }}>
@@ -3893,10 +3915,114 @@ function ExpensesInsightPanel({ expenses }) {
 }
 
 // ──────────────────────────────────────────────────────────
+// Auth form
+// ──────────────────────────────────────────────────────────
+
+function AuthForm({ onAuthed }) {
+  const [mode, setMode] = useState('login'); // 'login' | 'signup'
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    if (!email.includes('@')) { setError('Enter a valid email'); return; }
+    if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
+    setBusy(true);
+    try {
+      const user = mode === 'signup'
+        ? await auth.signup(email, password)
+        : await auth.login(email, password);
+      onAuthed(user);
+    } catch (err) {
+      setError(err.message || 'Something went wrong');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Theme />
+      <div className="app" style={{ paddingBottom: 24 }}>
+        <div className="px-5 pt-8" style={{ maxWidth: 480, margin: '0 auto' }}>
+          <div className="display" style={{ fontSize: 36, fontWeight: 700, marginBottom: 4 }}>
+            Batchwise
+          </div>
+          <div style={{ color: 'var(--muted)', fontSize: 14, marginBottom: 24 }}>
+            {mode === 'login' ? 'Sign in to your account.' : 'Create your account to start tracking.'}
+          </div>
+
+          <form onSubmit={submit} className="card-strong p-4 space-y-4">
+            <div>
+              <div className="uppercase-label mb-2">Email</div>
+              <input
+                className="input"
+                type="email"
+                inputMode="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                placeholder="you@example.com"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                disabled={busy}
+              />
+            </div>
+            <div>
+              <div className="uppercase-label mb-2">Password</div>
+              <input
+                className="input"
+                type="password"
+                placeholder={mode === 'signup' ? '8 characters minimum' : '••••••••'}
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                disabled={busy}
+              />
+            </div>
+            {error && (
+              <div className="card p-3" style={{ background: 'var(--red-soft)', borderColor: 'transparent', color: 'var(--red)', fontSize: 13 }}>
+                {error}
+              </div>
+            )}
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={busy}
+              style={{ background: 'var(--accent)', opacity: busy ? 0.5 : 1 }}
+            >
+              {busy
+                ? (mode === 'signup' ? 'Creating account…' : 'Signing in…')
+                : (mode === 'signup' ? 'Create account' : 'Sign in')}
+            </button>
+          </form>
+
+          <div style={{ textAlign: 'center', marginTop: 16 }}>
+            <button
+              type="button"
+              onClick={() => { setMode(m => m === 'login' ? 'signup' : 'login'); setError(null); }}
+              style={{ background: 'none', border: 'none', color: 'var(--accent)', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+              disabled={busy}
+            >
+              {mode === 'login' ? "Don't have an account? Create one" : 'Already have an account? Sign in'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ──────────────────────────────────────────────────────────
 // App
 // ──────────────────────────────────────────────────────────
 
 export default function App() {
+  // Auth state. 'pending' on first paint while we validate any stored token.
+  // 'anonymous' shows the AuthForm. 'authenticated' renders the app.
+  const [authStatus, setAuthStatus] = useState(getAuthToken() ? 'pending' : 'anonymous');
+  const [user, setUser] = useState(null);
+
   const [batches, setBatches] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -3913,6 +4039,27 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
 
+  // On mount, if there's a saved token, validate it. If valid, we're in.
+  // If not (revoked, expired, server reset), drop to AuthForm.
+  useEffect(() => {
+    if (authStatus !== 'pending') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = await auth.me();
+        if (cancelled) return;
+        setUser(me);
+        setAuthStatus('authenticated');
+      } catch (e) {
+        if (cancelled) return;
+        setAuthToken(null);
+        setUser(null);
+        setAuthStatus('anonymous');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authStatus]);
+
   const dashboardNetMode = (() => {
     try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
     catch { return 'actual'; }
@@ -3926,6 +4073,7 @@ export default function App() {
   }, [view]);
 
   useEffect(() => {
+    if (authStatus !== 'authenticated') return;
     (async () => {
       // Local first, so the UI lights up instantly even on a slow network.
       const rawExpenses = await loadExpenses();
@@ -4013,7 +4161,7 @@ export default function App() {
         setSyncStatus('error');
       }
     })();
-  }, []);
+  }, [authStatus]);
 
   const pushOne = (b) => {
     if (!api.enabled()) return;
@@ -4123,6 +4271,23 @@ export default function App() {
     removeExpenseRemote(id);
   };
 
+  if (authStatus === 'pending') {
+    return (
+      <>
+        <Theme />
+        <div className="app">
+          <div className="flex items-center justify-center" style={{ minHeight: '60vh' }}>
+            <Loader2 size={24} className="animate-spin" style={{ color: 'var(--muted)' }} />
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (authStatus === 'anonymous') {
+    return <AuthForm onAuthed={(u) => { setUser(u); setAuthStatus('authenticated'); }} />;
+  }
+
   return (
     <>
       <Theme />
@@ -4219,7 +4384,21 @@ export default function App() {
           <SettingsModal
             batches={batches}
             expenses={expenses}
+            user={user}
             onCancel={() => setShowSettings(false)}
+            onSignOut={async () => {
+              await auth.logout();
+              setShowSettings(false);
+              setBatches([]);
+              setExpenses([]);
+              setLoaded(false);
+              setUser(null);
+              setAuthStatus('anonymous');
+              try {
+                localStorage.removeItem(STORAGE_KEY);
+                localStorage.removeItem(EXPENSES_STORAGE_KEY);
+              } catch { /* ignore */ }
+            }}
             onImported={async ({ nextBatches, nextExpenses }) => {
               const sortedBatches = [...nextBatches].sort((a, b) => batchTime(b) - batchTime(a));
               const sortedExpenses = [...nextExpenses].sort((a, b) => expenseTime(b) - expenseTime(a));
