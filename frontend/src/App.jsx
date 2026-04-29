@@ -3175,6 +3175,13 @@ export default function App() {
   const [viewerImages, setViewerImages] = useState(null);
   const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
 
+  // Snap to top whenever the user switches between top-level tabs.
+  // Without this, scrolling down on Batches and tapping Insights lands you
+  // mid-page with no context.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [view]);
+
   useEffect(() => {
     (async () => {
       // Local first, so the UI lights up instantly even on a slow network.
