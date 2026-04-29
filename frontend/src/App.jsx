@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Check, X, BarChart2, List, Home, Trash2,
   Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff,
-  DollarSign, Settings as SettingsIcon, Download, Upload
+  DollarSign, Settings as SettingsIcon, Download, Upload, HelpCircle
 } from 'lucide-react';
 import { api, expensesApi, extractMulti, auth, getAuthToken, setAuthToken, dataApi } from './api';
 import { getImages, setImages, deleteImages, clearAllImages } from './imageStore';
@@ -772,11 +772,16 @@ function MetricCard({ label, value, sub }) {
   );
 }
 
-// IRS standard mileage rate for self-employed (2026). Used as an alternative
-// to summing actual gas/maintenance/insurance/tolls/parking expenses — many
-// shoppers prefer this for taxes, and it captures depreciation that "actual
-// gas only" tracking misses.
-const IRS_MILEAGE_RATE = 0.67;
+// IRS standard mileage rate for self-employed business use. Used as an
+// alternative to summing actual gas/maintenance/insurance/tolls/parking
+// expenses — many shoppers prefer this for taxes, and it captures
+// depreciation that "actual gas only" tracking misses.
+//
+// Bump this when the IRS posts the new rate in mid-December for the
+// upcoming year (irs.gov/tax-professionals/standard-mileage-rates).
+// History: 2024 = $0.67, 2025 = $0.70.
+const IRS_MILEAGE_RATE = 0.70;
+const IRS_MILEAGE_RATE_YEAR = 2025;
 const NET_MODE_KEY = 'batchwise:netMode';
 
 // YYYY-MM-DD in the user's local timezone, used as a stable bucket key for
@@ -1060,6 +1065,7 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
     try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
     catch { return 'actual'; }
   });
+  const [showNetHelp, setShowNetHelp] = useState(false);
   useEffect(() => {
     try { localStorage.setItem(NET_MODE_KEY, netMode); } catch { /* ignore */ }
   }, [netMode]);
@@ -1164,7 +1170,18 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
           {stats.totalExpenses > 0 && (
             <div className="mt-3 pt-3" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
               <div className="flex items-baseline justify-between mb-2">
-                <span style={{ color: 'var(--muted-soft)', fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Net</span>
+                <span style={{ color: 'var(--muted-soft)', fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  Net
+                  <button
+                    type="button"
+                    onClick={() => setShowNetHelp(v => !v)}
+                    aria-label="What does this mean?"
+                    aria-expanded={showNetHelp}
+                    style={{ background: 'none', border: 'none', padding: 0, color: 'var(--muted-soft)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
+                  >
+                    <HelpCircle size={13} />
+                  </button>
+                </span>
                 <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>
                   {fmt$(stats.net)}
                   {stats.netPerHour != null && (
@@ -1194,9 +1211,29 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
               </div>
               <div className="mono mt-2" style={{ fontSize: 10, color: 'var(--muted-soft)' }}>
                 {netMode === 'irs'
-                  ? `${stats.totalMiles.toFixed(1)}mi × $${IRS_MILEAGE_RATE.toFixed(2)} = ${fmt$(stats.irsCost)} (replaces gas/maint/insurance/tolls/parking)`
+                  ? `${stats.totalMiles.toFixed(1)}mi × $${IRS_MILEAGE_RATE.toFixed(2)} = ${fmt$(stats.irsCost)} (${IRS_MILEAGE_RATE_YEAR} rate, replaces gas/maint/insurance/tolls/parking)`
                   : 'Subtracts every logged expense'}
               </div>
+              {showNetHelp && (
+                <div className="mt-3 p-3" style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 8, fontSize: 12, lineHeight: 1.5, color: 'var(--muted-soft)' }}>
+                  <div style={{ fontWeight: 600, color: 'rgba(255,255,255,0.92)', marginBottom: 6 }}>How net is calculated</div>
+                  <div style={{ marginBottom: 8 }}>
+                    <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>Actual:</span> earnings minus every expense you've logged, at the dollar amount you entered.
+                  </div>
+                  <div style={{ marginBottom: 8 }}>
+                    <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>IRS rate:</span> swaps out vehicle expenses (gas, maintenance, insurance, tolls, parking — anything tagged "mileage related") for the IRS standard mileage deduction of ${IRS_MILEAGE_RATE.toFixed(2)}/mi ({IRS_MILEAGE_RATE_YEAR} rate). Non-vehicle expenses (food, supplies, etc.) still get subtracted at face value.
+                  </div>
+                  <div style={{ marginBottom: 8, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                    <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>This view: </span>
+                    {fmt$(stats.totalPay)} earned − {netMode === 'irs'
+                      ? <>{fmt$(stats.irsCost)} mileage − {fmt$(stats.totalExpenses - stats.irsCost)} other expenses = {fmt$(stats.net)}</>
+                      : <>{fmt$(stats.totalExpenses)} expenses = {fmt$(stats.net)}</>}
+                  </div>
+                  <div style={{ fontSize: 11, opacity: 0.8 }}>
+                    The IRS rate is meant to cover depreciation, fuel, repairs, insurance, and registration — pick whichever method gives you the bigger deduction at tax time.
+                  </div>
+                </div>
+              )}
             </div>
           )}
           <div className="divider my-4" style={{ background: 'rgba(255,255,255,0.1)' }} />
