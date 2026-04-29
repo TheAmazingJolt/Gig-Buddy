@@ -779,9 +779,12 @@ function MetricCard({ label, value, sub }) {
 //
 // Bump this when the IRS posts the new rate in mid-December for the
 // upcoming year (irs.gov/tax-professionals/standard-mileage-rates).
-// History: 2024 = $0.67, 2025 = $0.70.
-const IRS_MILEAGE_RATE = 0.70;
-const IRS_MILEAGE_RATE_YEAR = 2025;
+// History: 2024 = $0.67, 2025 = $0.70, 2026 = $0.725.
+const IRS_MILEAGE_RATE = 0.725;
+const IRS_MILEAGE_RATE_YEAR = 2026;
+// Display helper: keep at least two decimals, drop trailing zeros only past
+// the second. 0.725 → "0.725", 0.70 → "0.70", 0.67 → "0.67".
+const fmtMileageRate = (r) => r.toFixed(3).replace(/(\.\d\d)0+$/, '$1');
 const NET_MODE_KEY = 'batchwise:netMode';
 
 // YYYY-MM-DD in the user's local timezone, used as a stable bucket key for
@@ -1211,7 +1214,7 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
               </div>
               <div className="mono mt-2" style={{ fontSize: 10, color: 'var(--muted-soft)' }}>
                 {netMode === 'irs'
-                  ? `${stats.totalMiles.toFixed(1)}mi × $${IRS_MILEAGE_RATE.toFixed(2)} = ${fmt$(stats.irsCost)} (${IRS_MILEAGE_RATE_YEAR} rate, replaces gas/maint/insurance/tolls/parking)`
+                  ? `${stats.totalMiles.toFixed(1)}mi × $${fmtMileageRate(IRS_MILEAGE_RATE)} = ${fmt$(stats.irsCost)} (${IRS_MILEAGE_RATE_YEAR} rate, replaces gas/maint/insurance/tolls/parking)`
                   : 'Subtracts every logged expense'}
               </div>
               {showNetHelp && (
@@ -1221,7 +1224,7 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
                     <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>Actual:</span> earnings minus every expense you've logged, at the dollar amount you entered.
                   </div>
                   <div style={{ marginBottom: 8 }}>
-                    <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>IRS rate:</span> swaps out vehicle expenses (gas, maintenance, insurance, tolls, parking — anything tagged "mileage related") for the IRS standard mileage deduction of ${IRS_MILEAGE_RATE.toFixed(2)}/mi ({IRS_MILEAGE_RATE_YEAR} rate). Non-vehicle expenses (food, supplies, etc.) still get subtracted at face value.
+                    <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>IRS rate:</span> swaps out vehicle expenses (gas, maintenance, insurance, tolls, parking — anything tagged "mileage related") for the IRS standard mileage deduction of ${fmtMileageRate(IRS_MILEAGE_RATE)}/mi ({IRS_MILEAGE_RATE_YEAR} rate). Non-vehicle expenses (food, supplies, etc.) still get subtracted at face value.
                   </div>
                   <div style={{ marginBottom: 8, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
                     <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>This view: </span>
