@@ -670,7 +670,282 @@ function MetricCard({ label, value, sub }) {
 const IRS_MILEAGE_RATE = 0.67;
 const NET_MODE_KEY = 'batchwise:netMode';
 
-function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncStatus }) {
+// YYYY-MM-DD in the user's local timezone, used as a stable bucket key for
+// grouping batches and expenses by calendar day.
+function ymdLocal(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function dayBoundsFromYmd(ymd) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const start = new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+  const end = new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
+  return { start, end };
+}
+
+function shiftYmd(ymd, dayDelta) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const next = new Date(y, m - 1, d + dayDelta);
+  return ymdLocal(next.getTime());
+}
+
+function summarizeDay(batches, expenses, netMode = 'actual') {
+  const accepted = batches.filter(b => b.accepted);
+  const declined = batches.filter(b => !b.accepted);
+  const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
+  const totalMin = accepted.reduce((s, b) => s + (bestMinutes(b) || 0), 0);
+  const totalMiles = accepted.reduce((s, b) => s + (b.miles || 0), 0);
+  const allExp = expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const nonMileageExp = expenses.filter(e => !e.mileageRelated).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const irsCost = totalMiles * IRS_MILEAGE_RATE;
+  const cost = netMode === 'irs' ? nonMileageExp + irsCost : allExp;
+  const net = totalPay - cost;
+  return {
+    accepted: accepted.length,
+    declined: declined.length,
+    totalPay,
+    totalMin,
+    totalMiles,
+    allExp,
+    irsCost,
+    cost,
+    net,
+    perHour: totalMin ? totalPay / (totalMin / 60) : null,
+    netPerHour: totalMin ? net / (totalMin / 60) : null
+  };
+}
+
+function DayDetailModal({ ymd, batches, expenses, netMode, onClose, onReconcile, onViewImages, onEditExpense, onDeleteExpense }) {
+  const [activeYmd, setActiveYmd] = useState(ymd);
+
+  const { dayBatches, dayExpenses, summary, dateLabel } = useMemo(() => {
+    const { start, end } = dayBoundsFromYmd(activeYmd);
+    const dayBatches = batches
+      .filter(b => batchTime(b) >= start && batchTime(b) <= end)
+      .sort((a, b) => batchTime(a) - batchTime(b));
+    const dayExpenses = expenses
+      .filter(e => expenseTime(e) >= start && expenseTime(e) <= end)
+      .sort((a, b) => expenseTime(a) - expenseTime(b));
+    const summary = summarizeDay(dayBatches, dayExpenses, netMode);
+    const [y, m, d] = activeYmd.split('-').map(Number);
+    const dateLabel = new Date(y, m - 1, d).toLocaleDateString('en-US', {
+      weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+    });
+    return { dayBatches, dayExpenses, summary, dateLabel };
+  }, [activeYmd, batches, expenses, netMode]);
+
+  const isFuture = (() => {
+    const tomorrow = shiftYmd(ymdLocal(Date.now()), 0);
+    return activeYmd >= tomorrow;
+  })();
+
+  return (
+    <div className="modal">
+      <div className="px-5 pt-6 pb-4 flex items-center justify-between" style={{ background: 'var(--bg)' }}>
+        <button onClick={onClose} className="btn-ghost" style={{ padding: '8px 14px', fontSize: 14 }}>
+          <ArrowLeft size={16} style={{ display: 'inline', marginRight: 4 }} /> Close
+        </button>
+        <div className="display" style={{ fontSize: 18, fontWeight: 700, textAlign: 'center', flex: 1 }}>
+          {dateLabel}
+        </div>
+        <div style={{ width: 80 }} />
+      </div>
+
+      <div className="px-5">
+        <div className="flex gap-2 mb-4">
+          <button
+            onClick={() => setActiveYmd(shiftYmd(activeYmd, -1))}
+            className="btn-ghost"
+            style={{ flex: 1, padding: '10px', fontSize: 13 }}
+          >
+            ← Previous day
+          </button>
+          <button
+            onClick={() => setActiveYmd(shiftYmd(activeYmd, 1))}
+            className="btn-ghost"
+            style={{ flex: 1, padding: '10px', fontSize: 13, opacity: isFuture ? 0.4 : 1 }}
+            disabled={isFuture}
+          >
+            Next day →
+          </button>
+        </div>
+
+        <div className="card-ink p-5 mb-4">
+          <div className="flex items-baseline justify-between">
+            <div>
+              <div style={{ color: 'var(--muted-soft)', fontSize: 12, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                Earned
+              </div>
+              <div className="display" style={{ fontSize: 36, fontWeight: 600, lineHeight: 1 }}>
+                {fmt$$(summary.totalPay)}
+              </div>
+              {summary.cost > 0 && (
+                <div className="mono mt-1" style={{ fontSize: 12, color: 'var(--muted-soft)' }}>
+                  − {fmt$(summary.cost)} {netMode === 'irs' ? 'cost (IRS)' : 'expenses'}
+                </div>
+              )}
+            </div>
+            <div className="text-right">
+              <div style={{ color: 'var(--muted-soft)', fontSize: 12, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                Batches
+              </div>
+              <div className="mono" style={{ fontSize: 28, fontWeight: 500 }}>
+                {summary.accepted}<span style={{ color: 'var(--muted-soft)' }}>/{summary.accepted + summary.declined}</span>
+              </div>
+            </div>
+          </div>
+          {summary.cost > 0 && (
+            <div className="mt-3 pt-3" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+              <div className="flex items-baseline justify-between">
+                <span style={{ color: 'var(--muted-soft)', fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Net</span>
+                <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>
+                  {fmt$(summary.net)}
+                  {summary.netPerHour != null && (
+                    <span style={{ color: 'var(--muted-soft)', fontWeight: 400, marginLeft: 8 }}>
+                      · {fmtRate(summary.netPerHour)}/hr
+                    </span>
+                  )}
+                </span>
+              </div>
+            </div>
+          )}
+          <div className="divider my-4" style={{ background: 'rgba(255,255,255,0.1)' }} />
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <div style={{ color: 'var(--muted-soft)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                $/hr
+              </div>
+              <div className="mono" style={{ fontSize: 16, fontWeight: 600, marginTop: 2 }}>
+                {fmtRate(summary.perHour)}
+              </div>
+            </div>
+            <div>
+              <div style={{ color: 'var(--muted-soft)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                Miles
+              </div>
+              <div className="mono" style={{ fontSize: 16, fontWeight: 600, marginTop: 2 }}>
+                {summary.totalMiles ? summary.totalMiles.toFixed(1) : '—'}
+              </div>
+            </div>
+            <div>
+              <div style={{ color: 'var(--muted-soft)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                Active
+              </div>
+              <div className="mono" style={{ fontSize: 16, fontWeight: 600, marginTop: 2 }}>
+                {summary.totalMin ? `${(summary.totalMin / 60).toFixed(1)}h` : '—'}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {dayBatches.length > 0 && (
+          <>
+            <div className="uppercase-label mb-2">Batches</div>
+            <div className="space-y-2 mb-6">
+              {dayBatches.map(b => (
+                <BatchRow
+                  key={b.id}
+                  batch={b}
+                  onReconcile={onReconcile}
+                  onViewImages={onViewImages}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {dayExpenses.length > 0 && (
+          <>
+            <div className="uppercase-label mb-2">Expenses</div>
+            <div className="space-y-2 mb-8">
+              {dayExpenses.map(e => (
+                <ExpenseRow
+                  key={e.id}
+                  expense={e}
+                  onEdit={onEditExpense}
+                  onDelete={onDeleteExpense}
+                  onViewImage={(images) => onViewImages?.({ images })}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {dayBatches.length === 0 && dayExpenses.length === 0 && (
+          <div className="card p-8 text-center mb-8" style={{ color: 'var(--muted)' }}>
+            No activity logged for this day
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DaysList({ batches, expenses, netMode, limit = 14, onPickDay }) {
+  const days = useMemo(() => {
+    const map = new Map();
+    for (const b of batches) {
+      const k = ymdLocal(batchTime(b));
+      if (!map.has(k)) map.set(k, { ymd: k, batches: [], expenses: [] });
+      map.get(k).batches.push(b);
+    }
+    for (const e of expenses) {
+      const k = ymdLocal(expenseTime(e));
+      if (!map.has(k)) map.set(k, { ymd: k, batches: [], expenses: [] });
+      map.get(k).expenses.push(e);
+    }
+    return Array.from(map.values())
+      .map(d => ({ ...d, summary: summarizeDay(d.batches, d.expenses, netMode) }))
+      .sort((a, b) => b.ymd.localeCompare(a.ymd))
+      .slice(0, limit);
+  }, [batches, expenses, netMode, limit]);
+
+  if (days.length === 0) return null;
+
+  return (
+    <div className="mb-6">
+      <div className="uppercase-label mb-2">Days</div>
+      <div className="space-y-2">
+        {days.map(d => {
+          const [y, m, dd] = d.ymd.split('-').map(Number);
+          const dt = new Date(y, m - 1, dd);
+          const label = dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+          const hasNet = d.summary.cost > 0;
+          return (
+            <button
+              key={d.ymd}
+              onClick={() => onPickDay(d.ymd)}
+              className="card p-3"
+              style={{ width: '100%', display: 'block', textAlign: 'left', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}
+            >
+              <div className="flex items-baseline justify-between">
+                <span style={{ fontWeight: 600, fontSize: 14 }}>{label}</span>
+                <span className="mono" style={{ fontSize: 14, fontWeight: 600 }}>
+                  {fmt$(d.summary.totalPay)}
+                  {hasNet && (
+                    <span style={{ color: 'var(--muted)', fontWeight: 400, marginLeft: 6 }}>
+                      → {fmt$(d.summary.net)}
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className="mono mt-1" style={{ fontSize: 11, color: 'var(--muted)' }}>
+                {d.summary.accepted} accepted
+                {d.summary.declined > 0 && ` · ${d.summary.declined} declined`}
+                {d.summary.totalMin > 0 && ` · ${(d.summary.totalMin / 60).toFixed(1)}h`}
+                {d.summary.totalMiles > 0 && ` · ${d.summary.totalMiles.toFixed(1)}mi`}
+                {d.expenses.length > 0 && ` · ${d.expenses.length} expense${d.expenses.length === 1 ? '' : 's'}`}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPickDay, syncStatus }) {
   const [rangeFilter, setRangeFilter] = useState('week'); // 'day' | 'week' | 'month' | 'year'
   const [netMode, setNetMode] = useState(() => {
     try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
@@ -865,10 +1140,17 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncSt
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-2 mb-6">
             {recent.map(b => <BatchRow key={b.id} batch={b} onReconcile={onReconcile} onViewImages={onViewImages} />)}
           </div>
         )}
+
+        <DaysList
+          batches={batches}
+          expenses={expenses}
+          netMode={netMode}
+          onPickDay={onPickDay}
+        />
       </div>
     </div>
   );
@@ -3350,7 +3632,13 @@ export default function App() {
   const [reconcilingBatch, setReconcilingBatch] = useState(null);
   const [viewingImagesBatch, setViewingImagesBatch] = useState(null);
   const [viewerImages, setViewerImages] = useState(null);
+  const [viewingDayYmd, setViewingDayYmd] = useState(null);
   const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
+
+  const dashboardNetMode = (() => {
+    try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
+    catch { return 'actual'; }
+  })();
 
   // Snap to top whenever the user switches between top-level tabs.
   // Without this, scrolling down on Batches and tapping Insights lands you
@@ -3567,7 +3855,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === 'home' && <Dashboard batches={batches} expenses={expenses} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} syncStatus={syncStatus} />}
+            {view === 'home' && <Dashboard batches={batches} expenses={expenses} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} onPickDay={setViewingDayYmd} syncStatus={syncStatus} />}
             {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} />}
             {view === 'expenses' && (
               <ExpenseList
@@ -3635,7 +3923,21 @@ export default function App() {
           />
         )}
 
-        {!showLog && !showBulk && !showExpenseLog && !showLogChooser && (
+        {viewingDayYmd && (
+          <DayDetailModal
+            ymd={viewingDayYmd}
+            batches={batches}
+            expenses={expenses}
+            netMode={dashboardNetMode}
+            onClose={() => setViewingDayYmd(null)}
+            onReconcile={setReconcilingBatch}
+            onViewImages={(b) => setViewingImagesBatch(b)}
+            onEditExpense={(e) => { setEditingExpense(e); setShowExpenseLog(true); setViewingDayYmd(null); }}
+            onDeleteExpense={deleteExpense}
+          />
+        )}
+
+        {!showLog && !showBulk && !showExpenseLog && !showLogChooser && !viewingDayYmd && (
           <button className="fab" onClick={() => setShowLogChooser(true)} aria-label="Log">
             <Plus size={28} />
           </button>
