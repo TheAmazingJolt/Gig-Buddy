@@ -1905,6 +1905,27 @@ function BulkImportForm({ onSave, onCancel }) {
     setCandidates(prev => prev.map(c => c._idx === idx ? { ...c, _kept: true } : c));
   };
 
+  const toggleEdit = (idx) => {
+    setCandidates(prev => prev.map(c => c._idx === idx ? { ...c, _editing: !c._editing } : c));
+  };
+
+  // Numeric inputs come back as strings; coerce empty to null and otherwise to
+  // a number so candidateToBatch can keep treating them as numeric.
+  const editField = (idx, field, raw, numeric) => {
+    setCandidates(prev => prev.map(c => {
+      if (c._idx !== idx) return c;
+      let value = raw;
+      if (numeric) {
+        if (raw === '' || raw == null) value = null;
+        else {
+          const n = parseFloat(String(raw));
+          value = isNaN(n) ? null : n;
+        }
+      }
+      return { ...c, [field]: value };
+    }));
+  };
+
   const num = (v) => {
     if (v == null || v === '') return null;
     const n = parseFloat(String(v));
@@ -2218,6 +2239,121 @@ function BulkImportForm({ onSave, onCancel }) {
                         ))}
                       </div>
                     )}
+                    {c._kept && c._editing && (
+                      <div
+                        className="mt-3 p-3"
+                        style={{ background: 'var(--surface-2)', borderRadius: 8 }}
+                      >
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <div className="uppercase-label mb-1">Pay</div>
+                            <input
+                              className="input"
+                              type="number"
+                              inputMode="decimal"
+                              step="0.01"
+                              value={c.pay ?? ''}
+                              onChange={e => editField(c._idx, 'pay', e.target.value, true)}
+                            />
+                          </div>
+                          <div>
+                            <div className="uppercase-label mb-1">Miles</div>
+                            <input
+                              className="input"
+                              type="number"
+                              inputMode="decimal"
+                              step="0.1"
+                              value={c.miles ?? ''}
+                              onChange={e => editField(c._idx, 'miles', e.target.value, true)}
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <div className="uppercase-label mb-1">Store</div>
+                            <input
+                              className="input"
+                              type="text"
+                              value={c.store ?? ''}
+                              onChange={e => editField(c._idx, 'store', e.target.value, false)}
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <div className="uppercase-label mb-1">Type</div>
+                            <select
+                              className="input"
+                              value={String(c.type || '').toLowerCase()}
+                              onChange={e => editField(c._idx, 'type', e.target.value, false)}
+                            >
+                              <option value="shop_deliver">Shop &amp; deliver</option>
+                              <option value="shop_only">Shop only</option>
+                              <option value="delivery_only">Delivery only</option>
+                              <option value="mixed">Mixed</option>
+                            </select>
+                          </div>
+                          <div>
+                            <div className="uppercase-label mb-1">Items</div>
+                            <input
+                              className="input"
+                              type="number"
+                              inputMode="numeric"
+                              value={c.items ?? ''}
+                              onChange={e => editField(c._idx, 'items', e.target.value, true)}
+                            />
+                          </div>
+                          <div>
+                            <div className="uppercase-label mb-1">Units</div>
+                            <input
+                              className="input"
+                              type="number"
+                              inputMode="numeric"
+                              value={c.units ?? ''}
+                              onChange={e => editField(c._idx, 'units', e.target.value, true)}
+                            />
+                          </div>
+                          <div>
+                            <div className="uppercase-label mb-1">Stops</div>
+                            <input
+                              className="input"
+                              type="number"
+                              inputMode="numeric"
+                              value={c.stops ?? ''}
+                              onChange={e => editField(c._idx, 'stops', e.target.value, true)}
+                            />
+                          </div>
+                          <div>
+                            <div className="uppercase-label mb-1">Orders</div>
+                            <input
+                              className="input"
+                              type="number"
+                              inputMode="numeric"
+                              value={c.orders ?? ''}
+                              onChange={e => editField(c._idx, 'orders', e.target.value, true)}
+                            />
+                          </div>
+                          <div>
+                            <div className="uppercase-label mb-1">Est min</div>
+                            <input
+                              className="input"
+                              type="number"
+                              inputMode="numeric"
+                              value={c.estminutes ?? ''}
+                              onChange={e => editField(c._idx, 'estminutes', e.target.value, true)}
+                            />
+                          </div>
+                          {(isPostTrip || c.actualminutes != null) && (
+                            <div>
+                              <div className="uppercase-label mb-1">Actual min</div>
+                              <input
+                                className="input"
+                                type="number"
+                                inputMode="numeric"
+                                value={c.actualminutes ?? ''}
+                                onChange={e => editField(c._idx, 'actualminutes', e.target.value, true)}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     {c._kept && !c._accepted && !isPostTrip && (
                       <div className="mt-3">
                         <div className="uppercase-label mb-2">Decline reasons (pick all that apply)</div>
@@ -2252,9 +2388,16 @@ function BulkImportForm({ onSave, onCancel }) {
                             </button>
                           )}
                           <button
+                            onClick={() => toggleEdit(c._idx)}
+                            className="btn-ghost"
+                            style={{ flex: 1, padding: '8px', fontSize: 12 }}
+                          >
+                            {c._editing ? 'Done' : 'Edit'}
+                          </button>
+                          <button
                             onClick={() => discard(c._idx)}
                             className="btn-ghost"
-                            style={{ flex: isPostTrip ? 1 : undefined, padding: '8px 14px', fontSize: 12, color: 'var(--red)', borderColor: 'var(--red-soft)' }}
+                            style={{ padding: '8px 14px', fontSize: 12, color: 'var(--red)', borderColor: 'var(--red-soft)' }}
                           >
                             Discard
                           </button>
