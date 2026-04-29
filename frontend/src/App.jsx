@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Check, X, BarChart2, List, Home, Trash2,
   Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff,
-  DollarSign
+  DollarSign, Settings as SettingsIcon, Download, Upload
 } from 'lucide-react';
 import { api, expensesApi, extractMulti } from './api';
 import { getImages, setImages, deleteImages } from './imageStore';
@@ -251,6 +251,104 @@ async function saveExpenses(expenses) {
       await setImages(e.id, [e.receiptImage]);
     }
   }));
+}
+
+// ──────────────────────────────────────────────────────────
+// Export / Import — single self-contained JSON file
+// ──────────────────────────────────────────────────────────
+
+const EXPORT_FORMAT = 'batchwise-export';
+const EXPORT_VERSION = 1;
+
+// Pulls everything (metadata + IDB-stored images) into one inline blob so a
+// re-import on a fresh browser/device fully reconstructs the user's state.
+async function buildExport(batches, expenses) {
+  const hydratedBatches = await Promise.all(batches.map(async b => {
+    const images = Array.isArray(b.images) && b.images.length
+      ? b.images
+      : (await getImages(b.id) || null);
+    return images && images.length ? { ...b, images } : { ...b, images: null };
+  }));
+  const hydratedExpenses = await Promise.all(expenses.map(async e => {
+    if (e.receiptImage) return e;
+    const stored = await getImages(e.id);
+    return Array.isArray(stored) && stored[0]
+      ? { ...e, receiptImage: stored[0] }
+      : { ...e, receiptImage: null };
+  }));
+  let netMode = 'actual';
+  try { netMode = localStorage.getItem(NET_MODE_KEY) || 'actual'; } catch { /* ignore */ }
+  return {
+    format: EXPORT_FORMAT,
+    version: EXPORT_VERSION,
+    exportedAt: Date.now(),
+    exportedBy: null,
+    batches: hydratedBatches,
+    expenses: hydratedExpenses,
+    settings: { netMode }
+  };
+}
+
+// Returns { addedBatches, updatedBatches, addedExpenses, updatedExpenses,
+// nextBatches, nextExpenses } for the caller to surface counts and write back.
+// Merge rule: union by id; on conflict the side with the newer updatedAt wins.
+async function applyImport(json, currentBatches, currentExpenses) {
+  if (!json || typeof json !== 'object') throw new Error('Not a valid export file');
+  if (json.format !== EXPORT_FORMAT) throw new Error('Unrecognized export format');
+  if (typeof json.version !== 'number') throw new Error('Missing export version');
+  const importedBatches = Array.isArray(json.batches) ? json.batches : [];
+  const importedExpenses = Array.isArray(json.expenses) ? json.expenses : [];
+
+  const mergeById = (current, imported) => {
+    const map = new Map();
+    let added = 0;
+    let updated = 0;
+    for (const item of current) map.set(item.id, item);
+    for (const item of imported) {
+      if (!item || !item.id) continue;
+      const existing = map.get(item.id);
+      if (!existing) {
+        map.set(item.id, item);
+        added++;
+      } else {
+        const a = item.updatedAt || item.loggedAt || 0;
+        const b = existing.updatedAt || existing.loggedAt || 0;
+        if (a >= b) {
+          map.set(item.id, item);
+          updated++;
+        }
+      }
+    }
+    return { merged: Array.from(map.values()), added, updated };
+  };
+
+  const bResult = mergeById(currentBatches, importedBatches);
+  const eResult = mergeById(currentExpenses, importedExpenses);
+
+  // Push images back into IDB so the rest of the app finds them on the
+  // existing per-id key. Both metadata-with-images-stripped (saved by
+  // saveBatches/saveExpenses) and image-rich import payloads stay consistent.
+  await Promise.all(bResult.merged.map(async b => {
+    if (Array.isArray(b.images) && b.images.length) await setImages(b.id, b.images);
+  }));
+  await Promise.all(eResult.merged.map(async e => {
+    if (e.receiptImage) await setImages(e.id, [e.receiptImage]);
+  }));
+
+  if (json.settings && typeof json.settings === 'object') {
+    if (json.settings.netMode === 'irs' || json.settings.netMode === 'actual') {
+      try { localStorage.setItem(NET_MODE_KEY, json.settings.netMode); } catch { /* ignore */ }
+    }
+  }
+
+  return {
+    addedBatches: bResult.added,
+    updatedBatches: bResult.updated,
+    addedExpenses: eResult.added,
+    updatedExpenses: eResult.updated,
+    nextBatches: bResult.merged,
+    nextExpenses: eResult.merged
+  };
 }
 
 // ──────────────────────────────────────────────────────────
@@ -614,7 +712,7 @@ function SyncIndicator({ status }) {
   );
 }
 
-function Header({ batches, expenses, syncStatus }) {
+function Header({ batches, expenses, syncStatus, onOpenSettings }) {
   const today = new Date();
   const todayStr = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
@@ -631,7 +729,18 @@ function Header({ batches, expenses, syncStatus }) {
     <div className="px-5 pt-8 pb-4">
       <div className="flex items-center justify-between">
         <div className="uppercase-label">{todayStr}</div>
-        <SyncIndicator status={syncStatus} />
+        <div className="flex items-center" style={{ gap: 12 }}>
+          <SyncIndicator status={syncStatus} />
+          {onOpenSettings && (
+            <button
+              onClick={onOpenSettings}
+              aria-label="Settings"
+              style={{ background: 'none', border: 'none', padding: 4, color: 'var(--muted)', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+            >
+              <SettingsIcon size={18} />
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex items-baseline gap-3 mt-1 flex-wrap">
         <span className="display" style={{ fontSize: 44, fontWeight: 600, lineHeight: 1 }}>
@@ -945,7 +1054,7 @@ function DaysList({ batches, expenses, netMode, limit = 14, onPickDay }) {
   );
 }
 
-function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPickDay, syncStatus }) {
+function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPickDay, onOpenSettings, syncStatus }) {
   const [rangeFilter, setRangeFilter] = useState('week'); // 'day' | 'week' | 'month' | 'year'
   const [netMode, setNetMode] = useState(() => {
     try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
@@ -1010,7 +1119,7 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
 
   return (
     <div>
-      <Header batches={batches} expenses={expenses} syncStatus={syncStatus} />
+      <Header batches={batches} expenses={expenses} syncStatus={syncStatus} onOpenSettings={onOpenSettings} />
 
       <div className="px-5">
         <div className="flex items-baseline justify-between mb-2">
@@ -2935,6 +3044,174 @@ const TYPE_FILTERS = [
 // Expense components
 // ──────────────────────────────────────────────────────────
 
+function SettingsModal({ batches, expenses, onCancel, onImported }) {
+  const [busy, setBusy] = useState(null); // 'export' | 'import' | null
+  const [message, setMessage] = useState(null);
+  const [error, setError] = useState(null);
+  const [pending, setPending] = useState(null); // { json, summary } awaiting confirm
+
+  const handleExport = async () => {
+    setError(null); setMessage(null); setBusy('export');
+    try {
+      const payload = await buildExport(batches, expenses);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const today = new Date();
+      const ymd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `batchwise-export-${ymd}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setMessage(`Exported ${payload.batches.length} batch${payload.batches.length === 1 ? '' : 'es'} and ${payload.expenses.length} expense${payload.expenses.length === 1 ? '' : 's'}.`);
+    } catch (e) {
+      setError(e.message || 'Export failed');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handlePickFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setError(null); setMessage(null); setBusy('import');
+    try {
+      const text = await file.text();
+      const json = JSON.parse(text);
+      // Compute counts for the confirmation prompt without mutating anything yet.
+      if (!json || json.format !== EXPORT_FORMAT) {
+        throw new Error('Not a Batchwise export file');
+      }
+      const importedBatches = Array.isArray(json.batches) ? json.batches : [];
+      const importedExpenses = Array.isArray(json.expenses) ? json.expenses : [];
+      const existingBatchIds = new Set(batches.map(b => b.id));
+      const existingExpenseIds = new Set(expenses.map(e => e.id));
+      const summary = {
+        totalBatches: importedBatches.length,
+        totalExpenses: importedExpenses.length,
+        newBatches: importedBatches.filter(b => b && b.id && !existingBatchIds.has(b.id)).length,
+        newExpenses: importedExpenses.filter(e => e && e.id && !existingExpenseIds.has(e.id)).length
+      };
+      setPending({ json, summary });
+    } catch (e) {
+      setError(e.message || 'Could not read that file');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!pending) return;
+    setError(null); setBusy('import');
+    try {
+      const result = await applyImport(pending.json, batches, expenses);
+      await onImported(result);
+      const updated = result.updatedBatches + result.updatedExpenses;
+      const added = result.addedBatches + result.addedExpenses;
+      setMessage(`Imported. ${added} added, ${updated} updated.`);
+      setPending(null);
+    } catch (e) {
+      setError(e.message || 'Import failed');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="modal">
+      <div className="px-5 pt-6 pb-4 flex items-center justify-between" style={{ background: 'var(--bg)' }}>
+        <button onClick={onCancel} className="btn-ghost" style={{ padding: '8px 14px', fontSize: 14 }}>
+          <ArrowLeft size={16} style={{ display: 'inline', marginRight: 4 }} /> Close
+        </button>
+        <div className="display" style={{ fontSize: 22, fontWeight: 700 }}>Settings</div>
+        <div style={{ width: 80 }} />
+      </div>
+
+      <div className="px-5">
+        <div className="card p-4 mb-4">
+          <div className="uppercase-label mb-2">Backup &amp; transfer</div>
+          <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4, marginBottom: 12 }}>
+            Export downloads a single JSON file with every batch and expense (including images) so you can keep your own backups, switch devices, or restore data after a sign-in. Re-importing the same file is safe — entries merge by id, newer wins.
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={handleExport}
+              className="btn-primary"
+              disabled={busy !== null}
+              style={{ flex: 1, background: 'var(--accent)', minWidth: 140, opacity: busy ? 0.5 : 1 }}
+            >
+              <Download size={14} style={{ display: 'inline', marginRight: 6, verticalAlign: 'middle' }} />
+              {busy === 'export' ? 'Exporting…' : 'Export data'}
+            </button>
+            <label
+              className="btn-ghost"
+              style={{ flex: 1, minWidth: 140, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '12px', fontSize: 14, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1 }}
+            >
+              <Upload size={14} />
+              {busy === 'import' && !pending ? 'Reading…' : 'Import data'}
+              <input
+                type="file"
+                accept="application/json,.json"
+                onChange={handlePickFile}
+                disabled={busy !== null}
+                style={{ display: 'none' }}
+              />
+            </label>
+          </div>
+          <div className="mono mt-2" style={{ fontSize: 11, color: 'var(--muted)' }}>
+            {batches.length} batch{batches.length === 1 ? '' : 'es'} · {expenses.length} expense{expenses.length === 1 ? '' : 's'} currently on this device.
+          </div>
+        </div>
+
+        {pending && (
+          <div className="card p-4 mb-4" style={{ background: 'var(--accent-soft)', borderColor: 'transparent' }}>
+            <div className="uppercase-label mb-2" style={{ color: 'var(--accent)' }}>Confirm import</div>
+            <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4 }}>
+              Found {pending.summary.totalBatches} batch{pending.summary.totalBatches === 1 ? '' : 'es'} and {pending.summary.totalExpenses} expense{pending.summary.totalExpenses === 1 ? '' : 's'} in the file.
+              {' '}{pending.summary.newBatches + pending.summary.newExpenses > 0
+                ? `${pending.summary.newBatches + pending.summary.newExpenses} are new to this device.`
+                : 'All entries already exist locally; the import will refresh any with newer timestamps.'}
+            </div>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => setPending(null)}
+                className="btn-ghost"
+                style={{ flex: 1, padding: '10px', fontSize: 13 }}
+                disabled={busy !== null}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmImport}
+                className="btn-primary"
+                style={{ flex: 1, padding: '10px', fontSize: 13, background: 'var(--accent)', opacity: busy ? 0.5 : 1 }}
+                disabled={busy !== null}
+              >
+                {busy === 'import' ? 'Importing…' : 'Import'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {message && (
+          <div className="card p-3 mb-4" style={{ background: 'var(--green-soft)', borderColor: 'transparent', color: 'var(--green)', fontSize: 13 }}>
+            <Check size={14} style={{ display: 'inline', marginRight: 6, verticalAlign: 'middle' }} />
+            {message}
+          </div>
+        )}
+        {error && (
+          <div className="card p-3 mb-8" style={{ background: 'var(--red-soft)', borderColor: 'transparent', color: 'var(--red)', fontSize: 13 }}>
+            {error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LogChooser({ onPickBatch, onPickBulk, onPickExpense, onCancel }) {
   return (
     <>
@@ -3633,6 +3910,7 @@ export default function App() {
   const [viewingImagesBatch, setViewingImagesBatch] = useState(null);
   const [viewerImages, setViewerImages] = useState(null);
   const [viewingDayYmd, setViewingDayYmd] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
   const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
 
   const dashboardNetMode = (() => {
@@ -3855,7 +4133,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === 'home' && <Dashboard batches={batches} expenses={expenses} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} onPickDay={setViewingDayYmd} syncStatus={syncStatus} />}
+            {view === 'home' && <Dashboard batches={batches} expenses={expenses} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} onPickDay={setViewingDayYmd} onOpenSettings={() => setShowSettings(true)} syncStatus={syncStatus} />}
             {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} />}
             {view === 'expenses' && (
               <ExpenseList
@@ -3937,7 +4215,31 @@ export default function App() {
           />
         )}
 
-        {!showLog && !showBulk && !showExpenseLog && !showLogChooser && !viewingDayYmd && (
+        {showSettings && (
+          <SettingsModal
+            batches={batches}
+            expenses={expenses}
+            onCancel={() => setShowSettings(false)}
+            onImported={async ({ nextBatches, nextExpenses }) => {
+              const sortedBatches = [...nextBatches].sort((a, b) => batchTime(b) - batchTime(a));
+              const sortedExpenses = [...nextExpenses].sort((a, b) => expenseTime(b) - expenseTime(a));
+              setBatches(sortedBatches);
+              setExpenses(sortedExpenses);
+              await saveBatches(sortedBatches);
+              await saveExpenses(sortedExpenses);
+              if (api.enabled()) {
+                setSyncStatus('syncing');
+                await Promise.all(sortedBatches.map(b => api.upsert(b).catch(e => console.error('post-import push', b.id, e))))
+                  .catch(() => {});
+                await Promise.all(sortedExpenses.map(e => expensesApi.upsert(e).catch(err => console.error('post-import push expense', e.id, err))))
+                  .catch(() => {});
+                setSyncStatus('synced');
+              }
+            }}
+          />
+        )}
+
+        {!showLog && !showBulk && !showExpenseLog && !showLogChooser && !viewingDayYmd && !showSettings && (
           <button className="fab" onClick={() => setShowLogChooser(true)} aria-label="Log">
             <Plus size={28} />
           </button>
