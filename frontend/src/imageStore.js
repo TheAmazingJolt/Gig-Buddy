@@ -78,3 +78,16 @@ export async function getAllImageIds() {
     return [];
   }
 }
+
+// Wipe every image in the store. Used when the user clears all data or
+// deletes their account; metadata is wiped at the same time so anything
+// left in IDB would be orphaned.
+export async function clearAllImages() {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    await db.clear(STORE);
+  } catch (e) {
+    console.warn('clearAllImages failed', e);
+  }
+}

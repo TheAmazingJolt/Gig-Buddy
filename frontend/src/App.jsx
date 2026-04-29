@@ -4,8 +4,8 @@ import {
   Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff,
   DollarSign, Settings as SettingsIcon, Download, Upload
 } from 'lucide-react';
-import { api, expensesApi, extractMulti, auth, getAuthToken, setAuthToken } from './api';
-import { getImages, setImages, deleteImages } from './imageStore';
+import { api, expensesApi, extractMulti, auth, getAuthToken, setAuthToken, dataApi } from './api';
+import { getImages, setImages, deleteImages, clearAllImages } from './imageStore';
 
 const EXTRACTOR_URL = import.meta.env.VITE_EXTRACTOR_URL;
 
@@ -3053,11 +3053,12 @@ const TYPE_FILTERS = [
 // Expense components
 // ──────────────────────────────────────────────────────────
 
-function SettingsModal({ batches, expenses, user, onCancel, onImported, onSignOut }) {
-  const [busy, setBusy] = useState(null); // 'export' | 'import' | null
+function SettingsModal({ batches, expenses, user, onCancel, onImported, onSignOut, onClearData, onDeleteAccount }) {
+  const [busy, setBusy] = useState(null); // 'export' | 'import' | 'clear' | 'delete' | null
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
   const [pending, setPending] = useState(null); // { json, summary } awaiting confirm
+  const [confirming, setConfirming] = useState(null); // 'clear' | 'delete' | null
 
   const handleExport = async () => {
     setError(null); setMessage(null); setBusy('export');
@@ -3125,6 +3126,30 @@ function SettingsModal({ batches, expenses, user, onCancel, onImported, onSignOu
     } catch (e) {
       setError(e.message || 'Import failed');
     } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleClearData = async () => {
+    setError(null); setMessage(null); setBusy('clear');
+    try {
+      await onClearData();
+      setConfirming(null);
+      setMessage('All data cleared. Your account is still active.');
+    } catch (e) {
+      setError(e.message || 'Could not clear data');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    setError(null); setMessage(null); setBusy('delete');
+    try {
+      await onDeleteAccount();
+      // No need to clear confirming/message — modal is unmounting.
+    } catch (e) {
+      setError(e.message || 'Could not delete account');
       setBusy(null);
     }
   };
@@ -3225,8 +3250,87 @@ function SettingsModal({ batches, expenses, user, onCancel, onImported, onSignOu
           </div>
         )}
         {error && (
-          <div className="card p-3 mb-8" style={{ background: 'var(--red-soft)', borderColor: 'transparent', color: 'var(--red)', fontSize: 13 }}>
+          <div className="card p-3 mb-4" style={{ background: 'var(--red-soft)', borderColor: 'transparent', color: 'var(--red)', fontSize: 13 }}>
             {error}
+          </div>
+        )}
+
+        {user && (
+          <div className="card p-4 mb-8" style={{ borderColor: 'var(--red-soft)' }}>
+            <div className="uppercase-label mb-2" style={{ color: 'var(--red)' }}>Danger zone</div>
+            <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4, marginBottom: 12 }}>
+              Both actions are permanent and remove every batch and expense from the server. Export first if you might want to come back.
+            </div>
+
+            {confirming === 'clear' ? (
+              <div className="mb-2" style={{ background: 'var(--red-soft)', borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 13, color: 'var(--red)', fontWeight: 600, marginBottom: 8 }}>
+                  Wipe every batch and expense? Your account stays.
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setConfirming(null)}
+                    className="btn-ghost"
+                    style={{ flex: 1, padding: '10px', fontSize: 13 }}
+                    disabled={busy !== null}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleClearData}
+                    className="btn-primary"
+                    style={{ flex: 1, padding: '10px', fontSize: 13, background: 'var(--red)', opacity: busy ? 0.5 : 1 }}
+                    disabled={busy !== null}
+                  >
+                    {busy === 'clear' ? 'Clearing…' : 'Yes, clear data'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setConfirming('clear'); setError(null); setMessage(null); }}
+                className="btn-ghost mb-2"
+                style={{ width: '100%', color: 'var(--red)', borderColor: 'var(--red-soft)' }}
+                disabled={busy !== null}
+              >
+                Clear all data
+              </button>
+            )}
+
+            {confirming === 'delete' ? (
+              <div style={{ background: 'var(--red-soft)', borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 13, color: 'var(--red)', fontWeight: 600, marginBottom: 8 }}>
+                  Permanently delete account {user.email} and all data?
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setConfirming(null)}
+                    className="btn-ghost"
+                    style={{ flex: 1, padding: '10px', fontSize: 13 }}
+                    disabled={busy !== null}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleDeleteAccount}
+                    className="btn-primary"
+                    style={{ flex: 1, padding: '10px', fontSize: 13, background: 'var(--red)', opacity: busy ? 0.5 : 1 }}
+                    disabled={busy !== null}
+                  >
+                    {busy === 'delete' ? 'Deleting…' : 'Yes, delete account'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setConfirming('delete'); setError(null); setMessage(null); }}
+                className="btn-ghost"
+                style={{ width: '100%', color: 'var(--red)', borderColor: 'var(--red-soft)' }}
+                disabled={busy !== null}
+              >
+                Delete account
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -4388,6 +4492,28 @@ export default function App() {
             onCancel={() => setShowSettings(false)}
             onSignOut={async () => {
               await auth.logout();
+              setShowSettings(false);
+              setBatches([]);
+              setExpenses([]);
+              setLoaded(false);
+              setUser(null);
+              setAuthStatus('anonymous');
+              try {
+                localStorage.removeItem(STORAGE_KEY);
+                localStorage.removeItem(EXPENSES_STORAGE_KEY);
+              } catch { /* ignore */ }
+            }}
+            onClearData={async () => {
+              await dataApi.clearAll();
+              await clearAllImages();
+              setBatches([]);
+              setExpenses([]);
+              await saveBatches([]);
+              await saveExpenses([]);
+            }}
+            onDeleteAccount={async () => {
+              await auth.deleteAccount();
+              await clearAllImages();
               setShowSettings(false);
               setBatches([]);
               setExpenses([]);

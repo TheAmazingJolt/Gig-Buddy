@@ -122,6 +122,16 @@ export const auth = {
   },
   async me() {
     return (await authedFetch('/auth/me')).user;
+  },
+  async deleteAccount() {
+    await authedFetch('/auth/delete-account', { method: 'POST' });
+    setAuthToken(null);
+  }
+};
+
+export const dataApi = {
+  async clearAll() {
+    return authedFetch('/data/clear', { method: 'POST' });
   }
 };
 

@@ -356,6 +356,34 @@ app.get('/auth/me', requireUser, (req, res) => {
   res.json({ user: req.user });
 });
 
+// Wipes all of the current user's batches and expenses but keeps the user
+// account and any active session intact. Useful for "start fresh" without
+// losing your login.
+app.post('/data/clear', requireUser, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM batches  WHERE user_id = $1', [req.user.id]);
+    await pool.query('DELETE FROM expenses WHERE user_id = $1', [req.user.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('POST /data/clear:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Permanently deletes the current user's account, all their batches and
+// expenses, and all their sessions (cascade via the FK on sessions.user_id).
+app.post('/auth/delete-account', requireUser, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM batches  WHERE user_id = $1', [req.user.id]);
+    await pool.query('DELETE FROM expenses WHERE user_id = $1', [req.user.id]);
+    await pool.query('DELETE FROM users    WHERE id      = $1', [req.user.id]); // sessions cascade
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('POST /auth/delete-account:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Batches CRUD ──────────────────────────────────────────────────
 // Per-user; queries scoped by req.user.id.
 
