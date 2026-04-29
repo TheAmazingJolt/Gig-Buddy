@@ -1856,9 +1856,16 @@ function BulkImportForm({ onSave, onCancel }) {
         || screen === 'summary'
         || b.actualminutes != null
         || b.actualpay != null;
+      // In declined-only mode the user's intent overrides the model: even a
+      // misclassified summary screen should default to declined and stay
+      // freely toggleable. In accepted-default mode, post-trip evidence
+      // (summary screen, daily-summary index entry, actualPay) locks the
+      // candidate as accepted because declines never produce that data.
+      const lockAccepted = isPostTrip && !defaultDeclined;
       return {
         ...b,
-        _accepted: isPostTrip ? true : !defaultDeclined,
+        _accepted: lockAccepted ? true : !defaultDeclined,
+        _lockAccepted: lockAccepted,
         _kept: true,
         _declineReasons: [],
         _idx: i
@@ -2159,10 +2166,11 @@ function BulkImportForm({ onSave, onCancel }) {
             <div className="space-y-3 mb-6">
               {candidates.map(c => {
                 const sources = (c.imageindices || []).map(i => shots[i - 1]).filter(Boolean);
-                const isPostTrip = c.fromindex === true
-                  || String(c.screentype || '').toLowerCase() === 'summary'
-                  || c.actualminutes != null
-                  || c.actualpay != null;
+                // _lockAccepted is set at extraction time. In accepted-default
+                // mode it's true for summary/index candidates (declines never
+                // produce that data). In declined-only mode it's always false
+                // so the user can override a misclassified summary screen.
+                const isPostTrip = !!c._lockAccepted;
                 return (
                   <div
                     key={c._idx}

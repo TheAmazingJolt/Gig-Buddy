@@ -239,9 +239,16 @@ For "type", use the FIRST applicable rule in priority order:
      - Exactly ONE leg ("Your location → Store") with NO further legs to customer addresses: type = "shop_only". This holds even if the screen also says "2 orders" or any order count — multiple orders at one store is still ONE stop and shop_only.
      - TWO OR MORE legs ("Your location → Store → Customer address(es)"): type = "shop_deliver".
      - Journey starts at a non-retail pickup point and goes to customer addresses with no shopping leg: type = "delivery_only".
-  2. OFFER SCREEN with explicit text labels: "X shop and deliver" → "shop_deliver", "X shop only" → "shop_only", "X delivery only" → "delivery_only".
+  2. OFFER SCREEN — read the work-category text line near the bottom of the offer card (just above the row of item thumbnails / Accept button). This line is always present on offer screens and is the AUTHORITATIVE source for type — it overrides any guess from the map, the item count, or the route geometry. Map the exact phrase literally:
+     - "N shop and deliver" (e.g. "1 shop and deliver", "2 shop and deliver") → type = "shop_deliver" — for ANY N including N=1, regardless of how few items are listed and regardless of whether the route ends at a customer address. A single 1-order, 1-item shop-and-deliver IS still shop_deliver.
+     - "N shop only" → type = "shop_only"
+     - "N delivery only" → type = "delivery_only"
+     Common misreads to avoid:
+     - "1 shop and deliver" with 1-2 items → STILL shop_deliver, NOT shop_only.
+     - "1 shop and deliver" where the map shows a route into a customer's neighborhood → STILL shop_deliver, NOT delivery_only.
+     - The text "shop and deliver" wins over any other visual signal. Read it literally.
   3. HYBRID OFFER (offer screen showing two different category lines, e.g. "1 shop and deliver" + "1 shop only"): type = "mixed". Capture the per-category breakdown in notes.
-  4. OFFER SCREEN with no text labels: only a store pin and the user's location → likely shop_only; store + multiple home pins around it → likely shop_deliver.
+  4. OFFER SCREEN with no readable text labels at all: only a store pin and the user's location → likely shop_only; store + customer pin(s) with a delivery route line → likely shop_deliver. Use this only when rule 2's text line is genuinely unreadable.
 
 For "stops" — the number of PHYSICAL DESTINATIONS the shopper visits, NOT the count of orders/customers:
   - shop_only at one store = 1 (the store is the only stop, regardless of order count)
