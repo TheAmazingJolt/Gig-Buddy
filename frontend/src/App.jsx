@@ -2748,7 +2748,6 @@ function ExpenseForm({ initialExpense, onSave, onCancel }) {
               value={amount}
               onChange={e => setAmount(e.target.value)}
               style={{ paddingLeft: 28 }}
-              autoFocus
             />
           </div>
         </div>
