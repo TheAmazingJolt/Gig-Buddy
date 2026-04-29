@@ -41,6 +41,23 @@ export const api = {
   }
 };
 
+export const expensesApi = {
+  enabled: apiEnabled,
+  async list() {
+    const json = await authedFetch('/expenses');
+    return Array.isArray(json.expenses) ? json.expenses : [];
+  },
+  async upsert(expense) {
+    return authedFetch(`/expenses/${encodeURIComponent(expense.id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(expense)
+    });
+  },
+  async remove(id) {
+    return authedFetch(`/expenses/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+};
+
 // Extraction endpoints are not auth-gated, but they live on the same backend.
 export async function extractMulti(images) {
   if (!BASE) throw new Error('VITE_EXTRACTOR_URL is not set');

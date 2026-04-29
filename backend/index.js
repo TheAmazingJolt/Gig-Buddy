@@ -30,6 +30,14 @@ async function initDb() {
       updated_at  BIGINT NOT NULL DEFAULT 0
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id          TEXT PRIMARY KEY,
+      data        JSONB NOT NULL,
+      occurred_at BIGINT NOT NULL,
+      updated_at  BIGINT NOT NULL DEFAULT 0
+    )
+  `);
   console.log('db schema ready');
 }
 
@@ -255,6 +263,54 @@ app.delete('/batches/:id', requireAuth, requireDb, async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('DELETE /batches/:id:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Expenses CRUD ────────────────────────────────────────────────
+// Same shape and auth as /batches. Tracks gas, maintenance, food, etc.
+
+app.get('/expenses', requireAuth, requireDb, async (req, res) => {
+  try {
+    const r = await pool.query('SELECT data FROM expenses ORDER BY occurred_at DESC');
+    res.json({ expenses: r.rows.map(row => row.data) });
+  } catch (e) {
+    console.error('GET /expenses:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/expenses/:id', requireAuth, requireDb, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = req.body;
+    if (!data || typeof data !== 'object' || data.id !== id) {
+      return res.status(400).json({ error: 'Body must be the expense object with matching id' });
+    }
+    const occurredAt = Number(data.occurredAt) || Date.now();
+    const updatedAt = Number(data.updatedAt) || Date.now();
+    await pool.query(
+      `INSERT INTO expenses (id, data, occurred_at, updated_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE
+         SET data = EXCLUDED.data,
+             occurred_at = EXCLUDED.occurred_at,
+             updated_at = EXCLUDED.updated_at`,
+      [id, data, occurredAt, updatedAt]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('PUT /expenses/:id:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/expenses/:id', requireAuth, requireDb, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM expenses WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('DELETE /expenses/:id:', e);
     res.status(500).json({ error: e.message });
   }
 });

@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Check, X, BarChart2, List, Home, Trash2,
-  Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff
+  Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff,
+  DollarSign
 } from 'lucide-react';
-import { api, extractMulti } from './api';
+import { api, expensesApi, extractMulti } from './api';
 import { getImages, setImages, deleteImages } from './imageStore';
 
 const EXTRACTOR_URL = import.meta.env.VITE_EXTRACTOR_URL;
@@ -65,6 +66,24 @@ async function downscaleImage(dataUrl, maxW = 800, maxH = 1600, quality = 0.72) 
 }
 
 const STORAGE_KEY = 'batches';
+const EXPENSES_STORAGE_KEY = 'expenses';
+
+const EXPENSE_CATEGORIES = [
+  { val: 'gas',         label: 'Gas',         color: 'shop-deliver',   mileageRelated: true },
+  { val: 'maintenance', label: 'Maintenance', color: 'shop-only',      mileageRelated: true },
+  { val: 'food',        label: 'Food',        color: 'delivery-only',  mileageRelated: false },
+  { val: 'phone',       label: 'Phone',       color: 'mixed',          mileageRelated: false },
+  { val: 'insurance',   label: 'Insurance',   color: null,             mileageRelated: true },
+  { val: 'tolls',       label: 'Tolls',       color: null,             mileageRelated: true },
+  { val: 'parking',     label: 'Parking',     color: null,             mileageRelated: true },
+  { val: 'other',       label: 'Other',       color: null,             mileageRelated: false }
+];
+const CATEGORY_LABELS = Object.fromEntries(EXPENSE_CATEGORIES.map(c => [c.val, c.label]));
+const CATEGORY_META = Object.fromEntries(EXPENSE_CATEGORIES.map(c => [c.val, c]));
+
+const GAS_VENDORS = ['Shell', 'Chevron', 'BP', 'Wawa', 'Costco', 'Other'];
+
+const expenseTime = (e) => e.occurredAt || e.loggedAt || 0;
 
 const DEFAULT_STORES = [
   'Costco', 'Aldi', 'Sprouts', 'Publix', 'Wegmans', 'Kroger',
@@ -189,6 +208,47 @@ async function saveBatches(batches) {
   await Promise.all(batches.map(async b => {
     if (Array.isArray(b.images) && b.images.length) {
       await setImages(b.id, b.images);
+    }
+  }));
+}
+
+// Same split-storage pattern as batches: metadata to localStorage, the
+// receipt image to IDB by expense id (single-element array).
+async function loadExpenses() {
+  let parsed = [];
+  try {
+    const raw = localStorage.getItem(EXPENSES_STORAGE_KEY);
+    if (raw) {
+      const candidate = JSON.parse(raw);
+      if (Array.isArray(candidate)) parsed = candidate;
+    }
+  } catch (e) { /* ignore */ }
+
+  try {
+    return await Promise.all(parsed.map(async e => {
+      if (e.receiptImage) return e;
+      const stored = await getImages(e.id);
+      return Array.isArray(stored) && stored[0] ? { ...e, receiptImage: stored[0] } : e;
+    }));
+  } catch (err) {
+    return parsed;
+  }
+}
+
+async function saveExpenses(expenses) {
+  const slim = expenses.map(e => {
+    if (!('receiptImage' in e)) return e;
+    const { receiptImage: _drop, ...rest } = e;
+    return rest;
+  });
+  try {
+    localStorage.setItem(EXPENSES_STORAGE_KEY, JSON.stringify(slim));
+  } catch (err) {
+    console.error('saveExpenses metadata write failed', err);
+  }
+  await Promise.all(expenses.map(async e => {
+    if (e.receiptImage) {
+      await setImages(e.id, [e.receiptImage]);
     }
   }));
 }
@@ -2502,6 +2562,351 @@ const TYPE_FILTERS = [
   { val: 'mixed', label: 'Mixed', short: 'Mix' }
 ];
 
+// ──────────────────────────────────────────────────────────
+// Expense components
+// ──────────────────────────────────────────────────────────
+
+function LogChooser({ onPickBatch, onPickBulk, onPickExpense, onCancel }) {
+  return (
+    <>
+      <div className="modal-bg" onClick={onCancel} />
+      <div
+        style={{
+          position: 'fixed', left: 0, right: 0,
+          bottom: 'calc(env(safe-area-inset-bottom, 0) + 16px)',
+          zIndex: 52, padding: '0 16px',
+          animation: 'slideUp 0.18s ease-out'
+        }}
+      >
+        <div className="card-strong p-3" style={{ background: 'var(--surface)' }}>
+          <div className="uppercase-label mb-2" style={{ textAlign: 'center' }}>What are you logging?</div>
+          <div className="space-y-2">
+            <button onClick={onPickBatch} className="btn-primary" style={{ background: 'var(--accent)' }}>
+              Log batch
+            </button>
+            <button onClick={onPickExpense} className="btn-ghost" style={{ width: '100%' }}>
+              Log expense
+            </button>
+            <button onClick={onPickBulk} className="btn-ghost" style={{ width: '100%' }}>
+              Bulk import
+            </button>
+            <button onClick={onCancel} className="btn-ghost" style={{ width: '100%', borderColor: 'transparent', color: 'var(--muted)' }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ExpenseRow({ expense, onEdit, onDelete, onViewImage }) {
+  const meta = CATEGORY_META[expense.category] || CATEGORY_META.other;
+  const borderColor = meta.color
+    ? `var(--type-${meta.color})`
+    : 'var(--border)';
+  const dt = new Date(expenseTime(expense));
+  const dateStr = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const timeStr = dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+
+  return (
+    <div className="card p-4 fade-in" style={{ borderLeft: `4px solid ${borderColor}` }}>
+      <div className="flex items-start justify-between gap-3">
+        <div
+          className="flex-1 min-w-0"
+          onClick={onEdit ? () => onEdit(expense) : undefined}
+          style={{ cursor: onEdit ? 'pointer' : 'default' }}
+        >
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className={meta.color ? `pill pill-type-${meta.color}` : 'pill'} style={!meta.color ? { background: 'var(--surface-2)', color: 'var(--ink-soft)' } : undefined}>
+              {meta.label}
+            </span>
+            <span style={{ fontSize: 13, color: 'var(--muted)', marginLeft: 'auto' }}>
+              {dateStr} · {timeStr}
+            </span>
+          </div>
+          <div className="display" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2 }}>
+            {fmt$(expense.amount)}
+            {expense.vendor && <span style={{ color: 'var(--muted)', fontSize: 15, fontWeight: 400 }}> · {expense.vendor}</span>}
+          </div>
+          {expense.notes && (
+            <div className="mono mt-1" style={{ fontSize: 12, color: 'var(--muted)' }}>
+              {expense.notes}
+            </div>
+          )}
+          {expense.receiptImage && (
+            <div
+              style={{ display: 'flex', gap: 6, marginTop: 10, cursor: 'pointer' }}
+              onClick={(e) => { e.stopPropagation(); onViewImage?.([expense.receiptImage]); }}
+              role="button"
+            >
+              <img
+                src={expense.receiptImage}
+                alt="receipt"
+                style={{ height: 56, width: 'auto', borderRadius: 6, border: '1px solid var(--border-soft)' }}
+              />
+            </div>
+          )}
+        </div>
+        {onDelete && (
+          <button
+            onClick={() => onDelete(expense.id)}
+            style={{ background: 'none', border: 'none', padding: 6, color: 'var(--muted)', cursor: 'pointer' }}
+            aria-label="Delete"
+          >
+            <Trash2 size={16} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ExpenseForm({ initialExpense, onSave, onCancel }) {
+  const isEdit = !!initialExpense;
+  const [category, setCategory] = useState(initialExpense?.category || 'gas');
+  const [amount, setAmount] = useState(initialExpense ? String(initialExpense.amount) : '');
+  const [vendor, setVendor] = useState(initialExpense?.vendor || '');
+  const [notes, setNotes] = useState(initialExpense?.notes || '');
+  const [receiptImage, setReceiptImage] = useState(initialExpense?.receiptImage || null);
+
+  const initialDt = initialExpense ? new Date(initialExpense.occurredAt || Date.now()) : new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const localIsoString = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const [occurredLocal, setOccurredLocal] = useState(localIsoString(initialDt));
+
+  const canSave = amount && !isNaN(parseFloat(amount)) && parseFloat(amount) >= 0;
+
+  const handleReceipt = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const compressed = await downscaleImage(String(reader.result));
+        setReceiptImage(compressed);
+      } catch (err) {
+        console.error('receipt compress failed', err);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const submit = () => {
+    const occurredAt = Date.parse(occurredLocal) || Date.now();
+    const expense = {
+      id: initialExpense?.id || crypto.randomUUID(),
+      occurredAt,
+      loggedAt: initialExpense?.loggedAt || Date.now(),
+      category,
+      amount: parseFloat(amount),
+      vendor: vendor || null,
+      notes: notes || null,
+      mileageRelated: !!CATEGORY_META[category]?.mileageRelated,
+      receiptImage
+    };
+    onSave(expense);
+  };
+
+  return (
+    <div className="modal">
+      <div className="px-5 pt-6 pb-4 flex items-center justify-between" style={{ background: 'var(--bg)' }}>
+        <button onClick={onCancel} className="btn-ghost" style={{ padding: '8px 14px', fontSize: 14 }}>
+          <ArrowLeft size={16} style={{ display: 'inline', marginRight: 4 }} /> Cancel
+        </button>
+        <div className="display" style={{ fontSize: 22, fontWeight: 700 }}>{isEdit ? 'Edit expense' : 'Log expense'}</div>
+        <div style={{ width: 80 }} />
+      </div>
+
+      <div className="px-5 space-y-4">
+        <div>
+          <div className="uppercase-label mb-2">Category</div>
+          <div className="flex flex-wrap gap-2">
+            {EXPENSE_CATEGORIES.map(c => (
+              <button
+                key={c.val}
+                onClick={() => setCategory(c.val)}
+                className={`chip ${category === c.val ? 'chip-active' : ''}`}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="uppercase-label mb-2">Amount</div>
+          <div style={{ position: 'relative' }}>
+            <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted-soft)', fontSize: 16, fontWeight: 600 }}>$</span>
+            <input
+              className="input"
+              type="number"
+              inputMode="decimal"
+              step="0.01"
+              placeholder="0.00"
+              value={amount}
+              onChange={e => setAmount(e.target.value)}
+              style={{ paddingLeft: 28 }}
+              autoFocus
+            />
+          </div>
+        </div>
+
+        <div>
+          <div className="uppercase-label mb-2">When</div>
+          <input
+            className="input"
+            type="datetime-local"
+            value={occurredLocal}
+            onChange={e => setOccurredLocal(e.target.value)}
+          />
+        </div>
+
+        <div>
+          <div className="uppercase-label mb-2">Vendor (optional)</div>
+          {category === 'gas' && (
+            <div className="flex flex-wrap gap-2 mb-2">
+              {GAS_VENDORS.map(v => (
+                <button
+                  key={v}
+                  onClick={() => setVendor(v === 'Other' ? '' : v)}
+                  className={`chip ${vendor === v ? 'chip-active' : ''}`}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+          )}
+          <input
+            className="input"
+            placeholder={category === 'gas' ? 'Or type a station name…' : 'e.g. Walmart, McDonald\'s'}
+            value={vendor}
+            onChange={e => setVendor(e.target.value)}
+            style={{ fontFamily: 'inherit' }}
+          />
+        </div>
+
+        <div>
+          <div className="uppercase-label mb-2">Notes (optional)</div>
+          <input
+            className="input"
+            placeholder="Anything notable…"
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            style={{ fontFamily: 'inherit' }}
+          />
+        </div>
+
+        <div>
+          <div className="uppercase-label mb-2">Receipt (optional)</div>
+          {receiptImage ? (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+              <img
+                src={receiptImage}
+                alt="receipt"
+                style={{ height: 88, width: 'auto', borderRadius: 8, border: '1px solid var(--border)' }}
+              />
+              <button
+                onClick={() => setReceiptImage(null)}
+                className="btn-ghost"
+                style={{ padding: '8px 14px', fontSize: 12 }}
+              >
+                Remove
+              </button>
+            </div>
+          ) : (
+            <label className="btn-ghost" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px', fontSize: 13, cursor: 'pointer', width: '100%' }}>
+              <Camera size={14} />
+              Add receipt photo
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleReceipt}
+                style={{ display: 'none' }}
+              />
+            </label>
+          )}
+        </div>
+
+        <button
+          className="btn-primary mt-4 mb-8"
+          onClick={submit}
+          disabled={!canSave}
+          style={{ opacity: canSave ? 1 : 0.4, background: 'var(--accent)' }}
+        >
+          {isEdit ? 'Save changes' : 'Save expense'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ExpenseList({ expenses, onEdit, onDelete, onViewImage }) {
+  const [filter, setFilter] = useState('all'); // 'all' | category val
+  const filtered = useMemo(() => {
+    if (filter === 'all') return expenses;
+    return expenses.filter(e => e.category === filter);
+  }, [expenses, filter]);
+
+  const total = useMemo(
+    () => filtered.reduce((s, e) => s + (Number(e.amount) || 0), 0),
+    [filtered]
+  );
+
+  return (
+    <div>
+      <div className="px-5 pt-8 pb-4">
+        <div className="uppercase-label">All expenses</div>
+        <div className="display mt-1" style={{ fontSize: 36, fontWeight: 700, lineHeight: 1 }}>
+          {fmt$(total)}
+        </div>
+        <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 4 }}>
+          {filtered.length} {filtered.length === 1 ? 'entry' : 'entries'}
+        </div>
+      </div>
+      <div className="px-5 mb-4 flex gap-2 flex-wrap">
+        <button
+          className={`chip ${filter === 'all' ? 'chip-active' : ''}`}
+          onClick={() => setFilter('all')}
+        >
+          All <span style={{ opacity: 0.6, marginLeft: 4 }}>{expenses.length}</span>
+        </button>
+        {EXPENSE_CATEGORIES.map(c => {
+          const count = expenses.filter(e => e.category === c.val).length;
+          if (count === 0) return null;
+          return (
+            <button
+              key={c.val}
+              className={`chip ${filter === c.val ? 'chip-active' : ''}`}
+              onClick={() => setFilter(c.val)}
+            >
+              {c.label} <span style={{ opacity: 0.6, marginLeft: 4 }}>{count}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="px-5 space-y-2">
+        {filtered.length === 0 ? (
+          <div className="card p-8 text-center" style={{ color: 'var(--muted)' }}>
+            {expenses.length === 0 ? 'No expenses logged yet' : 'Nothing in this category'}
+          </div>
+        ) : (
+          filtered.map(e => (
+            <ExpenseRow
+              key={e.id}
+              expense={e}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onViewImage={onViewImage}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Insights({ batches }) {
   const [typeFilter, setTypeFilter] = useState('all');
   const [showMoreBuckets, setShowMoreBuckets] = useState(false);
@@ -2758,17 +3163,28 @@ function Insights({ batches }) {
 
 export default function App() {
   const [batches, setBatches] = useState([]);
+  const [expenses, setExpenses] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [view, setView] = useState('home'); // 'home' | 'list' | 'insights'
+  const [view, setView] = useState('home'); // 'home' | 'list' | 'expenses' | 'insights'
   const [showLog, setShowLog] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
+  const [showLogChooser, setShowLogChooser] = useState(false);
+  const [showExpenseLog, setShowExpenseLog] = useState(false);
+  const [editingExpense, setEditingExpense] = useState(null);
   const [reconcilingBatch, setReconcilingBatch] = useState(null);
   const [viewingImagesBatch, setViewingImagesBatch] = useState(null);
+  const [viewerImages, setViewerImages] = useState(null);
   const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
 
   useEffect(() => {
     (async () => {
       // Local first, so the UI lights up instantly even on a slow network.
+      const rawExpenses = await loadExpenses();
+      const localExpenses = rawExpenses
+        .map(e => ({ ...e, updatedAt: e.updatedAt || e.loggedAt || 0 }))
+        .sort((a, b) => expenseTime(b) - expenseTime(a));
+      setExpenses(localExpenses);
+
       const raw = await loadBatches();
       let local = raw.map(b => ({ ...b, updatedAt: b.updatedAt || b.loggedAt || 0 }));
 
@@ -2815,6 +3231,31 @@ export default function App() {
         // Push any backfill fixes up to the server too.
         if (fixed.length) {
           await Promise.all(fixed.map(b => api.upsert(b).catch(e => console.error('backfill push', b.id, e))));
+        }
+
+        // Pull and merge expenses with the same union-by-updatedAt strategy.
+        try {
+          const remoteExpenses = await expensesApi.list();
+          const expenseMap = new Map();
+          for (const e of [...localExpenses, ...remoteExpenses]) {
+            const stamp = e.updatedAt || e.loggedAt || 0;
+            const existing = expenseMap.get(e.id);
+            if (!existing || stamp > (existing.updatedAt || existing.loggedAt || 0)) {
+              expenseMap.set(e.id, e);
+            }
+          }
+          const mergedExpenses = Array.from(expenseMap.values())
+            .sort((a, b) => expenseTime(b) - expenseTime(a));
+          setExpenses(mergedExpenses);
+          await saveExpenses(mergedExpenses);
+
+          const remoteExpenseIds = new Set(remoteExpenses.map(e => e.id));
+          const toPushExpenses = mergedExpenses.filter(e => !remoteExpenseIds.has(e.id));
+          await Promise.all(toPushExpenses.map(e =>
+            expensesApi.upsert(e).catch(err => console.error('initial expense push', e.id, err))
+          ));
+        } catch (err) {
+          console.error('expense sync on load failed', err);
         }
 
         setSyncStatus('synced');
@@ -2887,6 +3328,52 @@ export default function App() {
     removeOne(id);
   };
 
+  const sortExpenses = (arr) => [...arr].sort((a, b) => expenseTime(b) - expenseTime(a));
+
+  const pushExpense = (e) => {
+    if (!expensesApi.enabled()) return;
+    setSyncStatus('syncing');
+    expensesApi.upsert(e)
+      .then(() => setSyncStatus('synced'))
+      .catch(err => { console.error('expense push failed', err); setSyncStatus('error'); });
+  };
+
+  const removeExpenseRemote = (id) => {
+    if (!expensesApi.enabled()) return;
+    setSyncStatus('syncing');
+    expensesApi.remove(id)
+      .then(() => setSyncStatus('synced'))
+      .catch(err => { console.error('expense delete failed', err); setSyncStatus('error'); });
+  };
+
+  const addExpense = async (e) => {
+    const stamped = { ...e, updatedAt: Date.now() };
+    const next = sortExpenses([stamped, ...expenses]);
+    setExpenses(next);
+    setShowExpenseLog(false);
+    setEditingExpense(null);
+    await saveExpenses(next);
+    pushExpense(stamped);
+  };
+
+  const updateExpense = async (e) => {
+    const stamped = { ...e, updatedAt: Date.now() };
+    const next = sortExpenses(expenses.map(x => x.id === stamped.id ? stamped : x));
+    setExpenses(next);
+    setShowExpenseLog(false);
+    setEditingExpense(null);
+    await saveExpenses(next);
+    pushExpense(stamped);
+  };
+
+  const deleteExpense = async (id) => {
+    const next = expenses.filter(e => e.id !== id);
+    setExpenses(next);
+    await saveExpenses(next);
+    deleteImages(id).catch(err => console.warn('delete IDB receipt failed', err));
+    removeExpenseRemote(id);
+  };
+
   return (
     <>
       <Theme />
@@ -2899,6 +3386,14 @@ export default function App() {
           <>
             {view === 'home' && <Dashboard batches={batches} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} syncStatus={syncStatus} />}
             {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} />}
+            {view === 'expenses' && (
+              <ExpenseList
+                expenses={expenses}
+                onEdit={(e) => { setEditingExpense(e); setShowExpenseLog(true); }}
+                onDelete={deleteExpense}
+                onViewImage={(images) => setViewerImages(images)}
+              />
+            )}
             {view === 'insights' && <Insights batches={batches} />}
           </>
         )}
@@ -2933,8 +3428,32 @@ export default function App() {
           />
         )}
 
-        {!showLog && (
-          <button className="fab" onClick={() => setShowLog(true)} aria-label="Log batch">
+        {showExpenseLog && (
+          <ExpenseForm
+            initialExpense={editingExpense}
+            onSave={editingExpense ? updateExpense : addExpense}
+            onCancel={() => { setShowExpenseLog(false); setEditingExpense(null); }}
+          />
+        )}
+
+        {showLogChooser && (
+          <LogChooser
+            onPickBatch={() => { setShowLogChooser(false); setShowLog(true); }}
+            onPickExpense={() => { setShowLogChooser(false); setEditingExpense(null); setShowExpenseLog(true); }}
+            onPickBulk={() => { setShowLogChooser(false); setShowBulk(true); }}
+            onCancel={() => setShowLogChooser(false)}
+          />
+        )}
+
+        {viewerImages && (
+          <ImageViewer
+            batch={{ images: viewerImages }}
+            onClose={() => setViewerImages(null)}
+          />
+        )}
+
+        {!showLog && !showBulk && !showExpenseLog && !showLogChooser && (
+          <button className="fab" onClick={() => setShowLogChooser(true)} aria-label="Log">
             <Plus size={28} />
           </button>
         )}
@@ -2955,18 +3474,18 @@ export default function App() {
             <span>Batches</span>
           </div>
           <div
+            className={`nav-item ${view === 'expenses' ? 'nav-item-active' : ''}`}
+            onClick={() => setView('expenses')}
+          >
+            <DollarSign size={20} />
+            <span>Expenses</span>
+          </div>
+          <div
             className={`nav-item ${view === 'insights' ? 'nav-item-active' : ''}`}
             onClick={() => setView('insights')}
           >
             <BarChart2 size={20} />
             <span>Insights</span>
-          </div>
-          <div
-            className="nav-item"
-            onClick={() => setShowLog(true)}
-          >
-            <Plus size={20} />
-            <span>Log</span>
           </div>
         </nav>
       </div>
