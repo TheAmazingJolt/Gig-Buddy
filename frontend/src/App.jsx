@@ -663,8 +663,22 @@ function MetricCard({ label, value, sub }) {
   );
 }
 
+// IRS standard mileage rate for self-employed (2026). Used as an alternative
+// to summing actual gas/maintenance/insurance/tolls/parking expenses — many
+// shoppers prefer this for taxes, and it captures depreciation that "actual
+// gas only" tracking misses.
+const IRS_MILEAGE_RATE = 0.67;
+const NET_MODE_KEY = 'batchwise:netMode';
+
 function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncStatus }) {
   const [rangeFilter, setRangeFilter] = useState('week'); // 'day' | 'week' | 'month' | 'year'
+  const [netMode, setNetMode] = useState(() => {
+    try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
+    catch { return 'actual'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(NET_MODE_KEY, netMode); } catch { /* ignore */ }
+  }, [netMode]);
   const RANGES = [
     { val: 'day',   label: 'Day',   days: 1 },
     { val: 'week',  label: 'Week',  days: 7 },
@@ -684,10 +698,22 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncSt
     const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
     const totalMin = accepted.reduce((s, b) => s + (bestMinutes(b) || 0), 0);
     const totalMiles = accepted.reduce((s, b) => s + (b.miles || 0), 0);
-    const totalExpenses = (expenses || [])
-      .filter(e => expenseTime(e) >= since)
+    const inRangeExpenses = (expenses || []).filter(e => expenseTime(e) >= since);
+
+    // Two ways to compute net:
+    //   actual: gross - sum of every logged expense (gas, maintenance, food, ...)
+    //   irs:    gross - non-mileage expenses - (totalMiles × IRS standard rate)
+    // The IRS path swaps out vehicle-related expenses for the standard $0.67/mi
+    // rate, which most shoppers use for taxes since it captures depreciation.
+    const allExpensesTotal = inRangeExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const nonMileageExpensesTotal = inRangeExpenses
+      .filter(e => !e.mileageRelated)
       .reduce((s, e) => s + (Number(e.amount) || 0), 0);
-    const net = totalPay - totalExpenses;
+    const irsCost = totalMiles * IRS_MILEAGE_RATE;
+    const totalCost = netMode === 'irs'
+      ? nonMileageExpensesTotal + irsCost
+      : allExpensesTotal;
+    const net = totalPay - totalCost;
 
     return {
       acceptRate: inRange.length ? (accepted.length / inRange.length) * 100 : null,
@@ -695,13 +721,15 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncSt
       netPerHour: totalMin ? net / (totalMin / 60) : null,
       perMile: totalMiles ? totalPay / totalMiles : null,
       totalPay,
-      totalExpenses,
+      totalExpenses: totalCost,
+      allExpensesTotal,
+      irsCost,
       net,
       totalMiles,
       count: accepted.length,
       offered: inRange.length
     };
-  }, [batches, expenses, rangeFilter, rangeDays]);
+  }, [batches, expenses, rangeFilter, rangeDays, netMode]);
 
   const recent = batches.slice(0, 5);
 
@@ -736,7 +764,7 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncSt
               </div>
               {stats.totalExpenses > 0 && (
                 <div className="mono mt-1" style={{ fontSize: 12, color: 'var(--muted-soft)' }}>
-                  − {fmt$(stats.totalExpenses)} expenses
+                  − {fmt$(stats.totalExpenses)} {netMode === 'irs' ? 'cost (IRS)' : 'expenses'}
                 </div>
               )}
             </div>
@@ -751,7 +779,7 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncSt
           </div>
           {stats.totalExpenses > 0 && (
             <div className="mt-3 pt-3" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
-              <div className="flex items-baseline justify-between">
+              <div className="flex items-baseline justify-between mb-2">
                 <span style={{ color: 'var(--muted-soft)', fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Net</span>
                 <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>
                   {fmt$(stats.net)}
@@ -761,6 +789,29 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncSt
                     </span>
                   )}
                 </span>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setNetMode('actual')}
+                  className={`chip ${netMode === 'actual' ? 'chip-active' : ''}`}
+                  style={{ flex: 1, justifyContent: 'center', padding: '6px 12px', fontSize: 11, background: netMode === 'actual' ? 'var(--surface)' : 'transparent', color: netMode === 'actual' ? 'var(--ink)' : 'var(--muted-soft)', borderColor: 'rgba(255,255,255,0.2)' }}
+                >
+                  Actual
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNetMode('irs')}
+                  className={`chip ${netMode === 'irs' ? 'chip-active' : ''}`}
+                  style={{ flex: 1, justifyContent: 'center', padding: '6px 12px', fontSize: 11, background: netMode === 'irs' ? 'var(--surface)' : 'transparent', color: netMode === 'irs' ? 'var(--ink)' : 'var(--muted-soft)', borderColor: 'rgba(255,255,255,0.2)' }}
+                >
+                  IRS rate
+                </button>
+              </div>
+              <div className="mono mt-2" style={{ fontSize: 10, color: 'var(--muted-soft)' }}>
+                {netMode === 'irs'
+                  ? `${stats.totalMiles.toFixed(1)}mi × $${IRS_MILEAGE_RATE.toFixed(2)} = ${fmt$(stats.irsCost)} (replaces gas/maint/insurance/tolls/parking)`
+                  : 'Subtracts every logged expense'}
               </div>
             </div>
           )}
@@ -2944,7 +2995,23 @@ function ExpenseList({ expenses, onEdit, onDelete, onViewImage }) {
 
 function Insights({ batches, expenses }) {
   const [typeFilter, setTypeFilter] = useState('all');
+  const [rangeFilter, setRangeFilter] = useState('all');
   const [showMoreBuckets, setShowMoreBuckets] = useState(false);
+
+  const RANGES = [
+    { val: 'all',   label: 'All',   days: null },
+    { val: 'day',   label: 'Day',   days: 1 },
+    { val: 'week',  label: 'Week',  days: 7 },
+    { val: 'month', label: 'Month', days: 30 },
+    { val: 'year',  label: 'Year',  days: 365 }
+  ];
+
+  const rangeSince = useMemo(() => {
+    if (rangeFilter === 'all') return null;
+    if (rangeFilter === 'day') return new Date(new Date().setHours(0, 0, 0, 0)).getTime();
+    const days = (RANGES.find(r => r.val === rangeFilter) || {}).days || 0;
+    return Date.now() - days * 24 * 60 * 60 * 1000;
+  }, [rangeFilter]);
 
   const typeCounts = useMemo(() => {
     const counts = { shop_deliver: 0, shop_only: 0, delivery_only: 0, mixed: 0 };
@@ -2953,9 +3020,15 @@ function Insights({ batches, expenses }) {
   }, [batches]);
 
   const filtered = useMemo(() => {
-    if (typeFilter === 'all') return batches;
-    return batches.filter(b => b.type === typeFilter);
-  }, [batches, typeFilter]);
+    let pool = rangeSince == null ? batches : batches.filter(b => batchTime(b) >= rangeSince);
+    if (typeFilter === 'all') return pool;
+    return pool.filter(b => b.type === typeFilter);
+  }, [batches, typeFilter, rangeSince]);
+
+  const filteredExpenses = useMemo(() => {
+    if (rangeSince == null) return expenses || [];
+    return (expenses || []).filter(e => expenseTime(e) >= rangeSince);
+  }, [expenses, rangeSince]);
 
   const insights = useMemo(() => {
     if (filtered.length < 3) return null;
@@ -3049,6 +3122,21 @@ function Insights({ batches, expenses }) {
     </div>
   );
 
+  const RangeChips = () => (
+    <div className="px-5 mb-4 flex gap-2 flex-wrap">
+      {RANGES.map(r => (
+        <button
+          key={r.val}
+          onClick={() => setRangeFilter(r.val)}
+          className={`chip ${rangeFilter === r.val ? 'chip-active' : ''}`}
+          style={{ padding: '6px 14px', fontSize: 13 }}
+        >
+          {r.label}
+        </button>
+      ))}
+    </div>
+  );
+
   const Header = () => (
     <div className="px-5 pt-8 pb-4">
       <div className="uppercase-label">Insights</div>
@@ -3080,6 +3168,7 @@ function Insights({ batches, expenses }) {
       <div>
         <Header />
         <FilterChips />
+        <RangeChips />
         <div className="px-5">
           <div className="card p-8 text-center">
             <TrendingUp size={28} style={{ color: 'var(--muted)', margin: '0 auto 12px' }} />
@@ -3099,6 +3188,7 @@ function Insights({ batches, expenses }) {
     <div>
       <Header />
       <FilterChips />
+      <RangeChips />
 
       {typeFilter === 'all' && (
         <div className="px-5 mb-4">
@@ -3189,7 +3279,7 @@ function Insights({ batches, expenses }) {
         </div>
       )}
 
-      <ExpensesInsightPanel expenses={expenses} />
+      <ExpensesInsightPanel expenses={filteredExpenses} />
     </div>
   );
 }
