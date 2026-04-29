@@ -614,7 +614,7 @@ function SyncIndicator({ status }) {
   );
 }
 
-function Header({ batches, syncStatus }) {
+function Header({ batches, expenses, syncStatus }) {
   const today = new Date();
   const todayStr = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
@@ -622,6 +622,10 @@ function Header({ batches, syncStatus }) {
   const todayAccepted = todayBatches.filter(b => b.accepted);
   const todayPay = todayAccepted.reduce((s, b) => s + (b.pay || 0), 0);
   const todayMiles = todayAccepted.reduce((s, b) => s + (b.miles || 0), 0);
+  const todayExpenses = (expenses || [])
+    .filter(e => expenseTime(e) >= startOfDay)
+    .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const todayNet = todayPay - todayExpenses;
 
   return (
     <div className="px-5 pt-8 pb-4">
@@ -638,6 +642,11 @@ function Header({ batches, syncStatus }) {
           {todayMiles > 0 && <> · {todayMiles.toFixed(1)}mi</>}
         </span>
       </div>
+      {todayExpenses > 0 && (
+        <div className="mono mt-2" style={{ fontSize: 12, color: 'var(--muted)' }}>
+          − {fmt$(todayExpenses)} expenses · <span style={{ color: 'var(--ink-soft)', fontWeight: 600 }}>net {fmt$(todayNet)}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -654,7 +663,7 @@ function MetricCard({ label, value, sub }) {
   );
 }
 
-function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
+function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, syncStatus }) {
   const [rangeFilter, setRangeFilter] = useState('week'); // 'day' | 'week' | 'month' | 'year'
   const RANGES = [
     { val: 'day',   label: 'Day',   days: 1 },
@@ -675,23 +684,30 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
     const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
     const totalMin = accepted.reduce((s, b) => s + (bestMinutes(b) || 0), 0);
     const totalMiles = accepted.reduce((s, b) => s + (b.miles || 0), 0);
+    const totalExpenses = (expenses || [])
+      .filter(e => expenseTime(e) >= since)
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const net = totalPay - totalExpenses;
 
     return {
       acceptRate: inRange.length ? (accepted.length / inRange.length) * 100 : null,
       perHour: totalMin ? totalPay / (totalMin / 60) : null,
+      netPerHour: totalMin ? net / (totalMin / 60) : null,
       perMile: totalMiles ? totalPay / totalMiles : null,
       totalPay,
+      totalExpenses,
+      net,
       totalMiles,
       count: accepted.length,
       offered: inRange.length
     };
-  }, [batches, rangeFilter, rangeDays]);
+  }, [batches, expenses, rangeFilter, rangeDays]);
 
   const recent = batches.slice(0, 5);
 
   return (
     <div>
-      <Header batches={batches} syncStatus={syncStatus} />
+      <Header batches={batches} expenses={expenses} syncStatus={syncStatus} />
 
       <div className="px-5">
         <div className="flex items-baseline justify-between mb-2">
@@ -718,6 +734,11 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
               <div className="display" style={{ fontSize: 40, fontWeight: 600, lineHeight: 1 }}>
                 {fmt$$(stats.totalPay)}
               </div>
+              {stats.totalExpenses > 0 && (
+                <div className="mono mt-1" style={{ fontSize: 12, color: 'var(--muted-soft)' }}>
+                  − {fmt$(stats.totalExpenses)} expenses
+                </div>
+              )}
             </div>
             <div className="text-right">
               <div style={{ color: 'var(--muted-soft)', fontSize: 12, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
@@ -728,6 +749,21 @@ function Dashboard({ batches, onLog, onReconcile, onViewImages, syncStatus }) {
               </div>
             </div>
           </div>
+          {stats.totalExpenses > 0 && (
+            <div className="mt-3 pt-3" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+              <div className="flex items-baseline justify-between">
+                <span style={{ color: 'var(--muted-soft)', fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Net</span>
+                <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>
+                  {fmt$(stats.net)}
+                  {stats.netPerHour != null && (
+                    <span style={{ color: 'var(--muted-soft)', fontWeight: 400, marginLeft: 8 }}>
+                      · {fmtRate(stats.netPerHour)}/hr
+                    </span>
+                  )}
+                </span>
+              </div>
+            </div>
+          )}
           <div className="divider my-4" style={{ background: 'rgba(255,255,255,0.1)' }} />
           <div className="grid grid-cols-4 gap-2">
             <div>
@@ -2906,7 +2942,7 @@ function ExpenseList({ expenses, onEdit, onDelete, onViewImage }) {
   );
 }
 
-function Insights({ batches }) {
+function Insights({ batches, expenses }) {
   const [typeFilter, setTypeFilter] = useState('all');
   const [showMoreBuckets, setShowMoreBuckets] = useState(false);
 
@@ -3152,6 +3188,57 @@ function Insights({ batches }) {
           </div>
         </div>
       )}
+
+      <ExpensesInsightPanel expenses={expenses} />
+    </div>
+  );
+}
+
+function ExpensesInsightPanel({ expenses }) {
+  const stats = useMemo(() => {
+    if (!expenses || expenses.length === 0) return null;
+    const total = expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const byCat = {};
+    for (const e of expenses) {
+      const k = e.category || 'other';
+      if (!byCat[k]) byCat[k] = { amount: 0, count: 0 };
+      byCat[k].amount += Number(e.amount) || 0;
+      byCat[k].count += 1;
+    }
+    const rows = Object.entries(byCat)
+      .map(([cat, s]) => ({ cat, ...s, share: total ? s.amount / total : 0 }))
+      .sort((a, b) => b.amount - a.amount);
+    return { total, rows, count: expenses.length };
+  }, [expenses]);
+
+  if (!stats) return null;
+
+  return (
+    <div className="px-5 mb-6">
+      <div className="uppercase-label mb-3">
+        Expenses · {stats.count} {stats.count === 1 ? 'entry' : 'entries'} · {fmt$$(stats.total)} total
+      </div>
+      <div className="card p-4 space-y-3">
+        {stats.rows.map(r => {
+          const meta = CATEGORY_META[r.cat] || CATEGORY_META.other;
+          const fillColor = meta.color ? `var(--type-${meta.color})` : 'var(--muted)';
+          return (
+            <div key={r.cat}>
+              <div className="flex justify-between items-baseline mb-1">
+                <span style={{ fontSize: 14, fontWeight: 600 }}>
+                  {meta.label}
+                </span>
+                <span className="mono" style={{ fontSize: 13 }}>
+                  {fmt$(r.amount)} <span style={{ color: 'var(--muted)' }}>· {(r.share * 100).toFixed(0)}% · {r.count}</span>
+                </span>
+              </div>
+              <div className="bar">
+                <div className="bar-fill" style={{ width: `${r.share * 100}%`, background: fillColor }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -3390,7 +3477,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === 'home' && <Dashboard batches={batches} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} syncStatus={syncStatus} />}
+            {view === 'home' && <Dashboard batches={batches} expenses={expenses} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} syncStatus={syncStatus} />}
             {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} />}
             {view === 'expenses' && (
               <ExpenseList
@@ -3400,7 +3487,7 @@ export default function App() {
                 onViewImage={(images) => setViewerImages(images)}
               />
             )}
-            {view === 'insights' && <Insights batches={batches} />}
+            {view === 'insights' && <Insights batches={batches} expenses={expenses} />}
           </>
         )}
 
