@@ -205,7 +205,22 @@ function reconcileTimes(obj) {
   return obj;
 }
 
-const reconcileBatch = (obj) => reconcileTimes(reconcileMileage(obj));
+const reconcileType = (obj) => {
+  if (!obj || typeof obj !== 'object') return obj;
+  const text = String(obj.categoryLineText || '').toLowerCase();
+  if (!text) return obj;
+  const isShopDeliver = /\bshop\s*and\s*deliver\b/.test(text);
+  const isShopOnly = /\bshop\s*only\b/.test(text);
+  const isDeliveryOnly = /\bdelivery\s*only\b/.test(text);
+  const matched = [isShopDeliver, isShopOnly, isDeliveryOnly].filter(Boolean).length;
+  if (matched > 1) obj.type = 'mixed';
+  else if (isShopDeliver) obj.type = 'shop_deliver';
+  else if (isShopOnly) obj.type = 'shop_only';
+  else if (isDeliveryOnly) obj.type = 'delivery_only';
+  return obj;
+};
+
+const reconcileBatch = (obj) => reconcileType(reconcileTimes(reconcileMileage(obj)));
 
 const EXTRACT_PROMPT = `You will see one or more screenshots from the Instacart Shopper app. Identify the screen type for each, then extract data accordingly.
 
@@ -250,6 +265,8 @@ For "type", use the FIRST applicable rule in priority order:
   3. HYBRID OFFER (offer screen showing two different category lines, e.g. "1 shop and deliver" + "1 shop only"): type = "mixed". Capture the per-category breakdown in notes.
   4. OFFER SCREEN with no readable text labels at all: only a store pin and the user's location → likely shop_only; store + customer pin(s) with a delivery route line → likely shop_deliver. Use this only when rule 2's text line is genuinely unreadable.
 
+For "categoryLineText" on OFFER screens, transcribe the bold work-category line at the bottom of the offer card EXACTLY as written, character-for-character. This text is the single most important field on an offer screen — the "type" field is derived directly from it server-side. Examples of what to copy: "1 shop and deliver", "2 shop and deliver", "3 shop and deliver • 14 items (28 units)", "1 shop only • 9 items", "1 delivery only", "1 shop and deliver + 1 shop only". Do NOT paraphrase, do NOT shorten, do NOT translate "shop and deliver" to "shop only". If the line is genuinely unreadable or absent (e.g. on summary screens), set null.
+
 For "stops" — the number of PHYSICAL DESTINATIONS the shopper visits, NOT the count of orders/customers:
   - shop_only at one store = 1 (the store is the only stop, regardless of order count)
   - shop_deliver = 1 (the store) + the number of distinct customer addresses delivered to
@@ -285,7 +302,8 @@ For TIMELINE timestamps on summary screens, look at the journey timeline (the ve
   "additionalStores": array of strings — any OTHER stores the shopper visits on the same batch, in journey order. Multi-stage offers ("Stage 1 / Stage 2") and offer maps with distinct store pins from different chains (e.g. Dollar Tree + Target, Publix + CVS) populate this. Empty array or null when only one store is involved.,
   "stops": number — physical destinations,
   "orders": number — customer/order count,
-  "notes": string — guaranteed earnings note, mixed-batch breakdown, anything else worth keeping
+  "notes": string — guaranteed earnings note, mixed-batch breakdown, anything else worth keeping,
+  "categoryLineText": string — verbatim copy of the offer card's work-category line, or null on non-offer screens
 }`;
 
 app.get('/', (req, res) => {
@@ -668,6 +686,7 @@ Return ONLY a valid JSON object — no markdown, no code fences, no prose:
       "stops": number,
       "orders": number,
       "notes": string | null,
+      "categoryLineText": string | null,
       "imageIndices": [number, ...],
       "fromIndex": boolean,
       "indexEntryTime": string | null
