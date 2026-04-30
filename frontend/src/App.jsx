@@ -787,6 +787,144 @@ const IRS_MILEAGE_RATE_YEAR = 2026;
 const fmtMileageRate = (r) => r.toFixed(3).replace(/(\.\d\d)0+$/, '$1');
 const NET_MODE_KEY = 'batchwise:netMode';
 
+// ── Tax set-aside ────────────────────────────────────────────────
+// Estimates how much to pull aside for end-of-year taxes on gig income.
+// Components:
+//   1. SE tax: 15.3% × 92.35% of net ≈ 14.13% (mandatory, bracket-independent).
+//   2. Federal income tax: marginal-bracket math on (otherIncome + gigNet)
+//      minus the same on otherIncome alone — captures bracket stacking when
+//      the user also has W-2 income.
+//   3. State income tax: a flat effective rate per state at gig-worker income
+//      levels. Conservative-side rounding so we err toward over-saving.
+//
+// Skips QBI 20% deduction and the half-SE-tax deduction on purpose; both
+// reduce real liability slightly, so the set-aside lands a touch high (the
+// user wanted a "land-with-extra-cash" buffer, not a precise estimate).
+//
+// Bump the bracket / std-deduction tables when the IRS posts new figures.
+const TAX_PREFS_KEY = 'batchwise:taxPrefs';
+const SE_EFFECTIVE_RATE = 0.1413;
+
+const FEDERAL_BRACKETS_2025 = {
+  single: [
+    [11925, 0.10], [48475, 0.12], [103350, 0.22], [197300, 0.24],
+    [250525, 0.32], [626350, 0.35], [Infinity, 0.37]
+  ],
+  mfj: [
+    [23850, 0.10], [96950, 0.12], [206700, 0.22], [394600, 0.24],
+    [501050, 0.32], [751600, 0.35], [Infinity, 0.37]
+  ],
+  hoh: [
+    [17000, 0.10], [64850, 0.12], [103350, 0.22], [197300, 0.24],
+    [250500, 0.32], [626350, 0.35], [Infinity, 0.37]
+  ]
+};
+
+const STANDARD_DEDUCTION_2025 = {
+  single: 15000,
+  mfj: 30000,
+  hoh: 22500
+};
+
+// Effective state income tax rate at typical gig-worker AGI (~$30-50k of
+// taxable income). For progressive states, picked the rate that applies in
+// that band; rounded conservative (slightly high) where ambiguous. NH's
+// interest/dividends-only tax doesn't hit gig income, so it's 0.
+const STATE_TAX_RATES = {
+  AL: 0.05,   AK: 0,      AZ: 0.025,  AR: 0.044,  CA: 0.06,
+  CO: 0.044,  CT: 0.05,   DE: 0.0555, DC: 0.065,  FL: 0,
+  GA: 0.0539, HI: 0.076,  ID: 0.058,  IL: 0.0495, IN: 0.0305,
+  IA: 0.046,  KS: 0.057,  KY: 0.04,   LA: 0.045,  ME: 0.0715,
+  MD: 0.05,   MA: 0.05,   MI: 0.0425, MN: 0.068,  MS: 0.044,
+  MO: 0.048,  MT: 0.0575, NE: 0.052,  NV: 0,      NH: 0,
+  NJ: 0.0175, NM: 0.049,  NY: 0.06,   NC: 0.045,  ND: 0.0204,
+  OH: 0.034,  OK: 0.0475, OR: 0.0875, PA: 0.0307, RI: 0.0475,
+  SC: 0.064,  SD: 0,      TN: 0,      TX: 0,      UT: 0.0455,
+  VT: 0.066,  VA: 0.0575, WA: 0,      WV: 0.0482, WI: 0.053,
+  WY: 0
+};
+
+const STATES_LIST = [
+  ['AL', 'Alabama'], ['AK', 'Alaska'], ['AZ', 'Arizona'], ['AR', 'Arkansas'],
+  ['CA', 'California'], ['CO', 'Colorado'], ['CT', 'Connecticut'], ['DE', 'Delaware'],
+  ['DC', 'District of Columbia'], ['FL', 'Florida'], ['GA', 'Georgia'], ['HI', 'Hawaii'],
+  ['ID', 'Idaho'], ['IL', 'Illinois'], ['IN', 'Indiana'], ['IA', 'Iowa'],
+  ['KS', 'Kansas'], ['KY', 'Kentucky'], ['LA', 'Louisiana'], ['ME', 'Maine'],
+  ['MD', 'Maryland'], ['MA', 'Massachusetts'], ['MI', 'Michigan'], ['MN', 'Minnesota'],
+  ['MS', 'Mississippi'], ['MO', 'Missouri'], ['MT', 'Montana'], ['NE', 'Nebraska'],
+  ['NV', 'Nevada'], ['NH', 'New Hampshire'], ['NJ', 'New Jersey'], ['NM', 'New Mexico'],
+  ['NY', 'New York'], ['NC', 'North Carolina'], ['ND', 'North Dakota'], ['OH', 'Ohio'],
+  ['OK', 'Oklahoma'], ['OR', 'Oregon'], ['PA', 'Pennsylvania'], ['RI', 'Rhode Island'],
+  ['SC', 'South Carolina'], ['SD', 'South Dakota'], ['TN', 'Tennessee'], ['TX', 'Texas'],
+  ['UT', 'Utah'], ['VT', 'Vermont'], ['VA', 'Virginia'], ['WA', 'Washington'],
+  ['WV', 'West Virginia'], ['WI', 'Wisconsin'], ['WY', 'Wyoming']
+];
+
+const FILING_STATUS_LABELS = {
+  single: 'Single',
+  mfj: 'Married filing jointly',
+  hoh: 'Head of household'
+};
+
+const DEFAULT_TAX_PREFS = {
+  enabled: false,
+  state: '',
+  filingStatus: 'single',
+  otherIncome: 0
+};
+
+function loadTaxPrefs() {
+  try {
+    const raw = localStorage.getItem(TAX_PREFS_KEY);
+    if (!raw) return { ...DEFAULT_TAX_PREFS };
+    const parsed = JSON.parse(raw);
+    return { ...DEFAULT_TAX_PREFS, ...parsed };
+  } catch {
+    return { ...DEFAULT_TAX_PREFS };
+  }
+}
+
+function federalTax(taxable, status) {
+  if (!Number.isFinite(taxable) || taxable <= 0) return 0;
+  const brackets = FEDERAL_BRACKETS_2025[status] || FEDERAL_BRACKETS_2025.single;
+  let tax = 0;
+  let prev = 0;
+  for (const [cap, rate] of brackets) {
+    if (taxable <= cap) {
+      tax += (taxable - prev) * rate;
+      return tax;
+    }
+    tax += (cap - prev) * rate;
+    prev = cap;
+  }
+  return tax;
+}
+
+// gigNet should be the ANNUAL Schedule-C net (gross gig pay − IRS mileage −
+// non-vehicle business expenses). We pin to IRS-mode net regardless of the
+// dashboard's display toggle since it's what most shoppers report on Schedule C.
+function computeTaxSetAside({ gigNet, otherIncome, state, filingStatus }) {
+  const empty = { total: 0, se: 0, federal: 0, stateTax: 0, percent: 0 };
+  if (!Number.isFinite(gigNet) || gigNet <= 0) return empty;
+  const status = filingStatus in FEDERAL_BRACKETS_2025 ? filingStatus : 'single';
+  const stateRate = STATE_TAX_RATES[state] || 0;
+  const stdDed = STANDARD_DEDUCTION_2025[status];
+  const other = Math.max(0, Number(otherIncome) || 0);
+  const taxableWith = Math.max(0, other + gigNet - stdDed);
+  const taxableWithout = Math.max(0, other - stdDed);
+  const federalAttribGig = Math.max(0, federalTax(taxableWith, status) - federalTax(taxableWithout, status));
+  const se = gigNet * SE_EFFECTIVE_RATE;
+  const stateTax = gigNet * stateRate;
+  const total = se + federalAttribGig + stateTax;
+  return {
+    total,
+    se,
+    federal: federalAttribGig,
+    stateTax,
+    percent: total / gigNet
+  };
+}
+
 // YYYY-MM-DD in the user's local timezone, used as a stable bucket key for
 // grouping batches and expenses by calendar day.
 function ymdLocal(ms) {
@@ -1062,13 +1200,14 @@ function DaysList({ batches, expenses, netMode, limit = 14, onPickDay }) {
   );
 }
 
-function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPickDay, onOpenSettings, syncStatus }) {
+function Dashboard({ batches, expenses, taxPrefs, onLog, onReconcile, onViewImages, onPickDay, onOpenSettings, syncStatus }) {
   const [rangeFilter, setRangeFilter] = useState('week'); // 'day' | 'week' | 'month' | 'year'
   const [netMode, setNetMode] = useState(() => {
     try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
     catch { return 'actual'; }
   });
   const [showNetHelp, setShowNetHelp] = useState(false);
+  const [showTaxHelp, setShowTaxHelp] = useState(false);
   useEffect(() => {
     try { localStorage.setItem(NET_MODE_KEY, netMode); } catch { /* ignore */ }
   }, [netMode]);
@@ -1108,6 +1247,11 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
       : allExpensesTotal;
     const net = totalPay - totalCost;
 
+    // IRS-mode net for the visible range — used as the base for tax set-aside
+    // regardless of which dashboard toggle is active, since Schedule C filers
+    // typically use the standard mileage method.
+    const periodIrsNet = totalPay - irsCost - nonMileageExpensesTotal;
+
     return {
       acceptRate: inRange.length ? (accepted.length / inRange.length) * 100 : null,
       perHour: totalMin ? totalPay / (totalMin / 60) : null,
@@ -1118,11 +1262,39 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
       allExpensesTotal,
       irsCost,
       net,
+      periodIrsNet,
       totalMiles,
       count: accepted.length,
       offered: inRange.length
     };
   }, [batches, expenses, rangeFilter, rangeDays, netMode]);
+
+  // Tax set-aside is computed off year-to-date IRS net so the marginal-bracket
+  // math is applied at the right tier. We then apply the effective rate to
+  // whatever period is currently on screen.
+  const taxSetAside = useMemo(() => {
+    if (!taxPrefs?.enabled) return null;
+    const yearStart = new Date(new Date().getFullYear(), 0, 1).getTime();
+    const ytdBatches = batches.filter(b => b.accepted && batchTime(b) >= yearStart);
+    const ytdExpenses = (expenses || []).filter(e => expenseTime(e) >= yearStart);
+    const ytdPay = ytdBatches.reduce((s, b) => s + (b.pay || 0), 0);
+    const ytdMiles = ytdBatches.reduce((s, b) => s + (b.miles || 0), 0);
+    const ytdNonMileExp = ytdExpenses.filter(e => !e.mileageRelated).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    const ytdIrsNet = Math.max(0, ytdPay - ytdMiles * IRS_MILEAGE_RATE - ytdNonMileExp);
+    const ytd = computeTaxSetAside({
+      gigNet: ytdIrsNet,
+      otherIncome: taxPrefs.otherIncome,
+      state: taxPrefs.state,
+      filingStatus: taxPrefs.filingStatus
+    });
+    if (ytd.percent <= 0) return null;
+    const periodNet = Math.max(0, stats.periodIrsNet);
+    return {
+      ytd,
+      periodAmount: periodNet * ytd.percent,
+      periodNet
+    };
+  }, [batches, expenses, taxPrefs, stats.periodIrsNet]);
 
   const recent = batches.slice(0, 5);
 
@@ -1234,6 +1406,50 @@ function Dashboard({ batches, expenses, onLog, onReconcile, onViewImages, onPick
                   </div>
                   <div style={{ fontSize: 11, opacity: 0.8 }}>
                     The IRS rate is meant to cover depreciation, fuel, repairs, insurance, and registration — pick whichever method gives you the bigger deduction at tax time.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {taxSetAside && (
+            <div className="mt-3 pt-3" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+              <div className="flex items-baseline justify-between">
+                <span style={{ color: 'var(--muted-soft)', fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  Set aside
+                  <button
+                    type="button"
+                    onClick={() => setShowTaxHelp(v => !v)}
+                    aria-label="What does this mean?"
+                    aria-expanded={showTaxHelp}
+                    style={{ background: 'none', border: 'none', padding: 0, color: 'var(--muted-soft)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
+                  >
+                    <HelpCircle size={13} />
+                  </button>
+                </span>
+                <span className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
+                  {fmt$(taxSetAside.periodAmount)}
+                  <span style={{ color: 'var(--muted-soft)', fontWeight: 400, marginLeft: 8 }}>
+                    · {(taxSetAside.ytd.percent * 100).toFixed(0)}%
+                  </span>
+                </span>
+              </div>
+              {showTaxHelp && (
+                <div className="mt-3 p-3" style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 8, fontSize: 12, lineHeight: 1.5, color: 'var(--muted-soft)' }}>
+                  <div style={{ fontWeight: 600, color: 'rgba(255,255,255,0.92)', marginBottom: 6 }}>What to set aside for taxes</div>
+                  <div style={{ marginBottom: 8 }}>
+                    Money to hold back so you're not short in April. Computed off year-to-date IRS-mode net (gross − mileage deduction − non-vehicle expenses), which is what you'll report on Schedule C.
+                  </div>
+                  <div style={{ marginBottom: 8, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                    <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>YTD breakdown:</span>
+                    <div className="mono mt-1" style={{ fontSize: 11 }}>
+                      SE tax (14.13%) {fmt$(taxSetAside.ytd.se)}<br/>
+                      Federal (marginal) {fmt$(taxSetAside.ytd.federal)}<br/>
+                      State {fmt$(taxSetAside.ytd.stateTax)}<br/>
+                      <span style={{ fontWeight: 600 }}>Total {fmt$(taxSetAside.ytd.total)} ≈ {(taxSetAside.ytd.percent * 100).toFixed(0)}% of net</span>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, opacity: 0.8 }}>
+                    Estimate, not tax advice. Skips QBI and the half-SE-tax deduction on purpose so it errs slightly high. Adjust state, filing status, or other income in Settings → Tax planning.
                   </div>
                 </div>
               )}
@@ -3244,12 +3460,14 @@ const TYPE_FILTERS = [
 // Expense components
 // ──────────────────────────────────────────────────────────
 
-function SettingsModal({ batches, expenses, user, onCancel, onImported, onSignOut, onClearData, onDeleteAccount }) {
+function SettingsModal({ batches, expenses, user, taxPrefs, onTaxPrefsChange, onCancel, onImported, onSignOut, onClearData, onDeleteAccount }) {
   const [busy, setBusy] = useState(null); // 'export' | 'import' | 'clear' | 'delete' | null
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
   const [pending, setPending] = useState(null); // { json, summary } awaiting confirm
   const [confirming, setConfirming] = useState(null); // 'clear' | 'delete' | null
+  const [showTaxHelp, setShowTaxHelp] = useState(false);
+  const updateTaxPrefs = (patch) => onTaxPrefsChange?.({ ...(taxPrefs || DEFAULT_TAX_PREFS), ...patch });
 
   const handleExport = async () => {
     setError(null); setMessage(null); setBusy('export');
@@ -3369,6 +3587,104 @@ function SettingsModal({ batches, expenses, user, onCancel, onImported, onSignOu
             </button>
           </div>
         )}
+        <div className="card p-4 mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="uppercase-label" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              Tax planning
+              <button
+                type="button"
+                onClick={() => setShowTaxHelp(v => !v)}
+                aria-label="What is this?"
+                aria-expanded={showTaxHelp}
+                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--muted)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
+              >
+                <HelpCircle size={14} />
+              </button>
+            </div>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: 'var(--ink-soft)' }}>
+              <input
+                type="checkbox"
+                checked={!!taxPrefs?.enabled}
+                onChange={e => updateTaxPrefs({ enabled: e.target.checked })}
+              />
+              Enabled
+            </label>
+          </div>
+          {showTaxHelp && (
+            <div className="p-3 mb-3" style={{ background: 'var(--surface-2)', borderRadius: 8, fontSize: 12, lineHeight: 1.5, color: 'var(--ink-soft)' }}>
+              <div style={{ fontWeight: 600, color: 'var(--ink)', marginBottom: 6 }}>How the set-aside is calculated</div>
+              <div style={{ marginBottom: 6 }}>
+                Three pieces, all applied to your IRS-mode net (gross − mileage deduction − non-vehicle expenses):
+              </div>
+              <ul style={{ paddingLeft: 18, marginBottom: 8, listStyle: 'disc' }}>
+                <li><strong>SE tax</strong>: 14.13% (15.3% × 92.35%). Mandatory for self-employment income.</li>
+                <li><strong>Federal income tax</strong>: marginal-bracket math on (other income + gig net). Bumping your day-job income up adds gig dollars at a higher bracket.</li>
+                <li><strong>State income tax</strong>: flat effective rate by state. 9 states are 0% (FL, TX, WA, NV, etc.).</li>
+              </ul>
+              <div style={{ fontWeight: 600, color: 'var(--ink)', marginBottom: 4 }}>Why we ask for these</div>
+              <ul style={{ paddingLeft: 18, marginBottom: 8, listStyle: 'disc' }}>
+                <li><strong>State</strong>: picks the right state tax rate.</li>
+                <li><strong>Filing status</strong>: federal brackets and standard deduction differ between Single, MFJ, and HoH.</li>
+                <li><strong>Other income</strong>: 1099 income stacks on top of W-2 income for federal-bracket purposes. Without it we'd assume gig is your only income and likely under-set-aside.</li>
+              </ul>
+              <div style={{ fontSize: 11, opacity: 0.85 }}>
+                Estimate, not tax advice. Skips QBI 20% and the half-SE-tax deduction so the number lands a touch high — better to find a surplus in April than a shortfall. Toggle off above if you'd rather skip the running line entirely.
+              </div>
+            </div>
+          )}
+          {taxPrefs?.enabled && (
+            <div className="space-y-3">
+              <div>
+                <div className="uppercase-label mb-1">State</div>
+                <select
+                  className="input"
+                  value={taxPrefs.state || ''}
+                  onChange={e => updateTaxPrefs({ state: e.target.value })}
+                >
+                  <option value="">Select state</option>
+                  {STATES_LIST.map(([code, name]) => (
+                    <option key={code} value={code}>{name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div className="uppercase-label mb-1">Filing status</div>
+                <select
+                  className="input"
+                  value={taxPrefs.filingStatus || 'single'}
+                  onChange={e => updateTaxPrefs({ filingStatus: e.target.value })}
+                >
+                  {Object.entries(FILING_STATUS_LABELS).map(([val, label]) => (
+                    <option key={val} value={val}>{label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div className="uppercase-label mb-1">Other annual income (W-2, etc.)</div>
+                <div style={{ position: 'relative' }}>
+                  <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted-soft)', fontSize: 16, fontWeight: 600 }}>$</span>
+                  <input
+                    className="input"
+                    type="number"
+                    inputMode="numeric"
+                    placeholder="0"
+                    value={taxPrefs.otherIncome ?? 0}
+                    onChange={e => updateTaxPrefs({ otherIncome: e.target.value === '' ? 0 : Number(e.target.value) })}
+                    style={{ paddingLeft: 28 }}
+                  />
+                </div>
+                <div className="mono mt-1" style={{ fontSize: 11, color: 'var(--muted)' }}>
+                  Total non-gig income for the year. 0 if gig is your only income.
+                </div>
+              </div>
+            </div>
+          )}
+          {!taxPrefs?.enabled && (
+            <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4 }}>
+              Optional running estimate of how much to hold back for end-of-year taxes. Toggle on to enter your state, filing status, and other income — the dashboard then shows a "Set aside" line so you know what's safe to spend.
+            </div>
+          )}
+        </div>
         <div className="card p-4 mb-4">
           <div className="uppercase-label mb-2">Backup &amp; transfer</div>
           <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.4, marginBottom: 12 }}>
@@ -4333,6 +4649,11 @@ export default function App() {
   const [viewingDayYmd, setViewingDayYmd] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [syncStatus, setSyncStatus] = useState(api.enabled() ? 'syncing' : 'local-only'); // 'syncing' | 'synced' | 'error' | 'local-only'
+  const [taxPrefs, setTaxPrefs] = useState(loadTaxPrefs);
+  useEffect(() => {
+    try { localStorage.setItem(TAX_PREFS_KEY, JSON.stringify(taxPrefs)); }
+    catch { /* ignore */ }
+  }, [taxPrefs]);
 
   // On mount, if there's a saved token, validate it. If valid, we're in.
   // If not (revoked, expired, server reset), drop to AuthForm.
@@ -4593,7 +4914,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === 'home' && <Dashboard batches={batches} expenses={expenses} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} onPickDay={setViewingDayYmd} onOpenSettings={() => setShowSettings(true)} syncStatus={syncStatus} />}
+            {view === 'home' && <Dashboard batches={batches} expenses={expenses} taxPrefs={taxPrefs} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} onPickDay={setViewingDayYmd} onOpenSettings={() => setShowSettings(true)} syncStatus={syncStatus} />}
             {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} />}
             {view === 'expenses' && (
               <ExpenseList
@@ -4680,6 +5001,8 @@ export default function App() {
             batches={batches}
             expenses={expenses}
             user={user}
+            taxPrefs={taxPrefs}
+            onTaxPrefsChange={setTaxPrefs}
             onCancel={() => setShowSettings(false)}
             onSignOut={async () => {
               await auth.logout();
