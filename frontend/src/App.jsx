@@ -35,13 +35,23 @@ function parseTs(v) {
 }
 
 // One-time backfill for batches saved before the backend started deriving
-// completedAt for shop_only and other no-final-leg batches.
+// completedAt for shop_only and other no-final-leg batches. Also stamps
+// `platform: 'instacart'` on every legacy row so the eventual multi-platform
+// migration is a no-op for existing data.
 // Returns [maybeUpdatedBatch, didChange].
 function backfillBatch(b) {
-  if (b.completedAt) return [b, false];
-  if (!b.acceptedAt || !b.actualMinutes) return [b, false];
-  const completedAt = b.acceptedAt + Math.round(b.actualMinutes * 60_000);
-  return [{ ...b, completedAt }, true];
+  let next = b;
+  let changed = false;
+  if (!next.platform) {
+    next = { ...next, platform: 'instacart' };
+    changed = true;
+  }
+  if (!next.completedAt && next.acceptedAt && next.actualMinutes) {
+    const completedAt = next.acceptedAt + Math.round(next.actualMinutes * 60_000);
+    next = { ...next, completedAt };
+    changed = true;
+  }
+  return [next, changed];
 }
 
 // Downscale + JPEG-encode a dataUrl so we can keep batch screenshots inline
@@ -2228,6 +2238,7 @@ function BulkImportForm({ onSave, onCancel }) {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
       screenshotTakenAt,
+      platform: 'instacart',
       acceptedAt: parseTs(c.acceptedat ?? c.accepted_at),
       completedAt: parseTs(c.completedat ?? c.completed_at),
       type: type || 'shop_deliver',
@@ -2939,6 +2950,7 @@ function LogForm({ onSave, onCancel, onBulk }) {
       id: crypto.randomUUID(),
       loggedAt: Date.now(),
       screenshotTakenAt,
+      platform: 'instacart',
       acceptedAt: acceptedAt,
       completedAt: completedAt,
       type,
