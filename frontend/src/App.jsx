@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Check, X, BarChart2, List, Home, Trash2,
   Loader2, TrendingUp, ArrowLeft, Sparkles, ClipboardPaste, Camera, Cloud, CloudOff,
-  DollarSign, Settings as SettingsIcon, Download, Upload, HelpCircle
+  DollarSign, Settings as SettingsIcon, Download, Upload, HelpCircle,
+  ChevronLeft, ChevronRight
 } from 'lucide-react';
 import { api, expensesApi, extractMulti, auth, getAuthToken, setAuthToken, dataApi } from './api';
 import { getImages, setImages, deleteImages, clearAllImages } from './imageStore';
@@ -135,10 +136,21 @@ const wallClockMinutes = (b) => {
   return null;
 };
 const bestMinutes = (b) => b.actualMinutes ?? wallClockMinutes(b) ?? b.estMinutes ?? null;
+// Dollars actually received for a batch: post-tip-window IC pay if reconciled,
+// otherwise the offer total, plus any cash the customer handed over outside
+// the app. Single source of truth for "real money earned" — every analytics
+// surface (dashboard totals, $/hr, by-day insights, tax set-aside) reads
+// through this so cash tips flow into the math automatically.
+const realPay = (b) => {
+  if (!b) return 0;
+  const base = b.actualPay ?? b.pay ?? 0;
+  return base + (b.cashTip ?? 0);
+};
 const dollarsPerHour = (b) => {
   const mins = bestMinutes(b);
-  if (!b.pay || !mins) return null;
-  return b.pay / (mins / 60);
+  const pay = realPay(b);
+  if (!pay || !mins) return null;
+  return pay / (mins / 60);
 };
 const dollarsPerMile = (b) => {
   if (!b.pay || !b.miles) return null;
@@ -149,7 +161,7 @@ const payDelta = (b) => isReconciled(b) ? b.actualPay - b.pay : null;
 const actualPerHour = (b) => {
   const mins = b.actualMinutes ?? wallClockMinutes(b) ?? b.estMinutes;
   if (!b.actualPay || !mins) return null;
-  return b.actualPay / (mins / 60);
+  return (b.actualPay + (b.cashTip ?? 0)) / (mins / 60);
 };
 // When a batch happened in the world, falling back to logged time when we don't know.
 // Preference: the IC-recorded acceptance time > the screenshot's iOS capture time
@@ -728,7 +740,7 @@ function Header({ batches, expenses, syncStatus, onOpenSettings }) {
   const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
   const todayBatches = batches.filter(b => batchTime(b) >= startOfDay);
   const todayAccepted = todayBatches.filter(b => b.accepted);
-  const todayPay = todayAccepted.reduce((s, b) => s + (b.pay || 0), 0);
+  const todayPay = todayAccepted.reduce((s, b) => s + realPay(b), 0);
   const todayMiles = todayAccepted.reduce((s, b) => s + (b.miles || 0), 0);
   const todayExpenses = (expenses || [])
     .filter(e => expenseTime(e) >= startOfDay)
@@ -955,10 +967,101 @@ function shiftYmd(ymd, dayDelta) {
   return ymdLocal(next.getTime());
 }
 
+// ── Calendar-period bounds for the dashboard / insights range chips ──
+// All bounds are local-TZ (matches the daily-bucket convention from ymdLocal).
+// Day:   midnight → midnight + 24h
+// Week:  configurable start day; bounds stretch from that day's midnight to
+//        midnight 7 days later. Default Sunday start matches Gridwise.
+// Month: 1st 00:00:00 → last-day 23:59:59 of the calendar month.
+// Year:  Jan 1 → Dec 31 of the calendar year.
+const WEEK_START_KEY = 'batchwise:weekStart';
+const WEEKDAY_LABELS_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function loadWeekStartDay() {
+  try {
+    const raw = localStorage.getItem(WEEK_START_KEY);
+    const n = parseInt(raw, 10);
+    return Number.isInteger(n) && n >= 0 && n <= 6 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function dayBounds(ms, dayOffset = 0) {
+  const d = new Date(ms);
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate() + dayOffset).getTime();
+  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + dayOffset + 1).getTime() - 1;
+  return { start, end };
+}
+
+function weekBounds(ms, weekStartDay = 0, weekOffset = 0) {
+  const d = new Date(ms);
+  // How many days to roll back from `d` to land on the week's start.
+  const back = (d.getDay() - weekStartDay + 7) % 7;
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate() - back + weekOffset * 7).getTime();
+  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() - back + weekOffset * 7 + 7).getTime() - 1;
+  return { start, end };
+}
+
+function monthBounds(ms, monthOffset = 0) {
+  const d = new Date(ms);
+  const start = new Date(d.getFullYear(), d.getMonth() + monthOffset, 1).getTime();
+  const end = new Date(d.getFullYear(), d.getMonth() + monthOffset + 1, 1).getTime() - 1;
+  return { start, end };
+}
+
+function yearBounds(ms, yearOffset = 0) {
+  const d = new Date(ms);
+  const start = new Date(d.getFullYear() + yearOffset, 0, 1).getTime();
+  const end = new Date(d.getFullYear() + yearOffset + 1, 0, 1).getTime() - 1;
+  return { start, end };
+}
+
+// Returns { start, end, label } for the visible period chip + offset.
+// Single source of truth so Dashboard and Insights stay in sync.
+function rangeBounds(rangeFilter, periodOffset, weekStartDay) {
+  const now = Date.now();
+  if (rangeFilter === 'day') {
+    const { start, end } = dayBounds(now, periodOffset);
+    const d = new Date(start);
+    let label;
+    if (periodOffset === 0) label = 'Today';
+    else if (periodOffset === -1) label = 'Yesterday';
+    else label = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    return { start, end, label };
+  }
+  if (rangeFilter === 'week') {
+    const { start, end } = weekBounds(now, weekStartDay, periodOffset);
+    const s = new Date(start);
+    const e = new Date(end);
+    const sameMonth = s.getMonth() === e.getMonth();
+    const sameYear = s.getFullYear() === e.getFullYear();
+    const sm = s.toLocaleDateString('en-US', { month: 'short' });
+    const em = e.toLocaleDateString('en-US', { month: 'short' });
+    let label;
+    if (sameMonth) label = `${sm} ${s.getDate()}–${e.getDate()}, ${e.getFullYear()}`;
+    else if (sameYear) label = `${sm} ${s.getDate()} – ${em} ${e.getDate()}, ${e.getFullYear()}`;
+    else label = `${sm} ${s.getDate()}, ${s.getFullYear()} – ${em} ${e.getDate()}, ${e.getFullYear()}`;
+    return { start, end, label };
+  }
+  if (rangeFilter === 'month') {
+    const { start, end } = monthBounds(now, periodOffset);
+    const label = new Date(start).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    return { start, end, label };
+  }
+  if (rangeFilter === 'year') {
+    const { start, end } = yearBounds(now, periodOffset);
+    const label = String(new Date(start).getFullYear());
+    return { start, end, label };
+  }
+  // Fallback shouldn't happen, but degrade safely to today.
+  return { ...dayBounds(now, 0), label: 'Today' };
+}
+
 function summarizeDay(batches, expenses, netMode = 'actual') {
   const accepted = batches.filter(b => b.accepted);
   const declined = batches.filter(b => !b.accepted);
-  const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
+  const totalPay = accepted.reduce((s, b) => s + realPay(b), 0);
   const totalMin = accepted.reduce((s, b) => s + (bestMinutes(b) || 0), 0);
   const totalMiles = accepted.reduce((s, b) => s + (b.miles || 0), 0);
   const allExp = expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
@@ -1210,8 +1313,9 @@ function DaysList({ batches, expenses, netMode, limit = 14, onPickDay }) {
   );
 }
 
-function Dashboard({ batches, expenses, taxPrefs, onLog, onReconcile, onViewImages, onPickDay, onOpenSettings, syncStatus }) {
+function Dashboard({ batches, expenses, taxPrefs, weekStartDay = 0, onLog, onReconcile, onViewImages, onPickDay, onOpenSettings, syncStatus }) {
   const [rangeFilter, setRangeFilter] = useState('week'); // 'day' | 'week' | 'month' | 'year'
+  const [periodOffset, setPeriodOffset] = useState(0); // 0 = current, -1 = prior, etc.
   const [netMode, setNetMode] = useState(() => {
     try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
     catch { return 'actual'; }
@@ -1222,25 +1326,34 @@ function Dashboard({ batches, expenses, taxPrefs, onLog, onReconcile, onViewImag
     try { localStorage.setItem(NET_MODE_KEY, netMode); } catch { /* ignore */ }
   }, [netMode]);
   const RANGES = [
-    { val: 'day',   label: 'Day',   days: 1 },
-    { val: 'week',  label: 'Week',  days: 7 },
-    { val: 'month', label: 'Month', days: 30 },
-    { val: 'year',  label: 'Year',  days: 365 }
+    { val: 'day',   label: 'Day' },
+    { val: 'week',  label: 'Week' },
+    { val: 'month', label: 'Month' },
+    { val: 'year',  label: 'Year' }
   ];
-  const rangeDays = (RANGES.find(r => r.val === rangeFilter) || RANGES[1]).days;
+  // Reset offset when the user switches range chips so they don't end up on
+  // "March 2026" when flipping from Year (offset=0) to Month.
+  const pickRange = (val) => { setRangeFilter(val); setPeriodOffset(0); };
+
+  const period = useMemo(
+    () => rangeBounds(rangeFilter, periodOffset, weekStartDay),
+    [rangeFilter, periodOffset, weekStartDay]
+  );
 
   const stats = useMemo(() => {
-    // Day uses calendar boundary (today since midnight) to match the daily header;
-    // Week / Month / Year use rolling lookbacks ("how am I doing lately").
-    const since = rangeFilter === 'day'
-      ? new Date(new Date().setHours(0, 0, 0, 0)).getTime()
-      : Date.now() - rangeDays * 24 * 60 * 60 * 1000;
-    const inRange = batches.filter(b => batchTime(b) >= since);
+    const { start, end } = period;
+    const inRange = batches.filter(b => {
+      const t = batchTime(b);
+      return t >= start && t <= end;
+    });
     const accepted = inRange.filter(b => b.accepted);
-    const totalPay = accepted.reduce((s, b) => s + (b.pay || 0), 0);
+    const totalPay = accepted.reduce((s, b) => s + realPay(b), 0);
     const totalMin = accepted.reduce((s, b) => s + (bestMinutes(b) || 0), 0);
     const totalMiles = accepted.reduce((s, b) => s + (b.miles || 0), 0);
-    const inRangeExpenses = (expenses || []).filter(e => expenseTime(e) >= since);
+    const inRangeExpenses = (expenses || []).filter(e => {
+      const t = expenseTime(e);
+      return t >= start && t <= end;
+    });
 
     // Two ways to compute net:
     //   actual: gross - sum of every logged expense (gas, maintenance, food, ...)
@@ -1277,7 +1390,7 @@ function Dashboard({ batches, expenses, taxPrefs, onLog, onReconcile, onViewImag
       count: accepted.length,
       offered: inRange.length
     };
-  }, [batches, expenses, rangeFilter, rangeDays, netMode]);
+  }, [batches, expenses, period, netMode]);
 
   // Tax set-aside is computed off year-to-date IRS net so the marginal-bracket
   // math is applied at the right tier. We then apply the effective rate to
@@ -1287,7 +1400,7 @@ function Dashboard({ batches, expenses, taxPrefs, onLog, onReconcile, onViewImag
     const yearStart = new Date(new Date().getFullYear(), 0, 1).getTime();
     const ytdBatches = batches.filter(b => b.accepted && batchTime(b) >= yearStart);
     const ytdExpenses = (expenses || []).filter(e => expenseTime(e) >= yearStart);
-    const ytdPay = ytdBatches.reduce((s, b) => s + (b.pay || 0), 0);
+    const ytdPay = ytdBatches.reduce((s, b) => s + realPay(b), 0);
     const ytdMiles = ytdBatches.reduce((s, b) => s + (b.miles || 0), 0);
     const ytdNonMileExp = ytdExpenses.filter(e => !e.mileageRelated).reduce((s, e) => s + (Number(e.amount) || 0), 0);
     const ytdIrsNet = Math.max(0, ytdPay - ytdMiles * IRS_MILEAGE_RATE - ytdNonMileExp);
@@ -1313,20 +1426,51 @@ function Dashboard({ batches, expenses, taxPrefs, onLog, onReconcile, onViewImag
       <Header batches={batches} expenses={expenses} syncStatus={syncStatus} onOpenSettings={onOpenSettings} />
 
       <div className="px-5">
-        <div className="flex items-baseline justify-between mb-2">
-          <div className="flex gap-2">
-            {RANGES.map(r => (
+        <div className="flex gap-2 mb-2">
+          {RANGES.map(r => (
+            <button
+              key={r.val}
+              onClick={() => pickRange(r.val)}
+              className={`chip ${rangeFilter === r.val ? 'chip-active' : ''}`}
+              style={{ padding: '6px 14px', fontSize: 13 }}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+        <div
+          className="flex items-center justify-between mb-3"
+          style={{ minHeight: 28 }}
+        >
+          <button
+            type="button"
+            onClick={() => setPeriodOffset(o => o - 1)}
+            aria-label="Previous period"
+            style={{ background: 'none', border: 'none', padding: 6, color: 'var(--ink-soft)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <div className="display" style={{ fontSize: 14, fontWeight: 600, textAlign: 'center', flex: 1 }}>
+            {period.label}
+            {periodOffset !== 0 && (
               <button
-                key={r.val}
-                onClick={() => setRangeFilter(r.val)}
-                className={`chip ${rangeFilter === r.val ? 'chip-active' : ''}`}
-                style={{ padding: '6px 14px', fontSize: 13 }}
+                type="button"
+                onClick={() => setPeriodOffset(0)}
+                style={{ background: 'none', border: 'none', padding: '0 0 0 8px', color: 'var(--accent)', fontSize: 11, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' }}
               >
-                {r.label}
+                today
               </button>
-            ))}
+            )}
           </div>
-          <div className="uppercase-label">{rangeFilter === 'day' ? 'Today' : `Last ${rangeDays} days`}</div>
+          <button
+            type="button"
+            onClick={() => setPeriodOffset(o => o + 1)}
+            aria-label="Next period"
+            disabled={periodOffset >= 0}
+            style={{ background: 'none', border: 'none', padding: 6, color: periodOffset >= 0 ? 'var(--muted-soft)' : 'var(--ink-soft)', cursor: periodOffset >= 0 ? 'default' : 'pointer', display: 'inline-flex', alignItems: 'center' }}
+          >
+            <ChevronRight size={18} />
+          </button>
         </div>
         <div className="card-ink p-5 mb-4">
           <div className="flex items-baseline justify-between">
@@ -1549,6 +1693,7 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
   const tipBait = delta != null && delta < 0;
   // Hide the "Final" pill when the actual matches the offer exactly — no new info to show.
   const showReconciledPill = reconciled && delta != null && Math.abs(delta) > 0.01;
+  const hasCashTip = batch.cashTip != null && batch.cashTip > 0;
   const images = Array.isArray(batch.images) ? batch.images : [];
 
   return (
@@ -1627,7 +1772,24 @@ function BatchRow({ batch, onDelete, onReconcile, onViewImages }) {
               onClick={onReconcile ? () => onReconcile(batch) : undefined}
             >
               Final {fmt$(batch.actualPay)} · Δ {delta >= 0 ? '+' : '−'}{fmt$(Math.abs(delta))}
+              {hasCashTip && <> · +{fmt$(batch.cashTip)} cash</>}
               {actualPerHour(batch) != null && <> · {fmtRate(actualPerHour(batch))}/hr actual</>}
+            </div>
+          )}
+          {batch.accepted && !showReconciledPill && hasCashTip && (
+            <div
+              className="mono mt-2"
+              style={{
+                fontSize: 12,
+                padding: '6px 10px',
+                borderRadius: 8,
+                background: 'var(--green-soft)',
+                color: 'var(--green)',
+                cursor: onReconcile ? 'pointer' : 'default'
+              }}
+              onClick={onReconcile ? () => onReconcile(batch) : undefined}
+            >
+              + {fmt$(batch.cashTip)} cash tip
             </div>
           )}
           {batch.accepted && !reconciled && onReconcile && (
@@ -1682,16 +1844,23 @@ function ReconcileForm({ batch, onSave, onCancel }) {
   const [actualPay, setActualPay] = useState(batch.actualPay != null ? String(batch.actualPay) : '');
   const [actualTip, setActualTip] = useState(batch.actualTip != null ? String(batch.actualTip) : '');
   const [actualMinutes, setActualMinutes] = useState(batch.actualMinutes != null ? String(batch.actualMinutes) : '');
+  const [cashTip, setCashTip] = useState(batch.cashTip != null ? String(batch.cashTip) : '');
 
-  const canSave = actualPay && !isNaN(parseFloat(actualPay));
+  const actualPayValid = actualPay && !isNaN(parseFloat(actualPay));
+  const cashTipValid = cashTip && !isNaN(parseFloat(cashTip));
+  // Allow saving with just a cash tip — you might know about the cash before
+  // the IC tip-adjustment window closes. reconciledAt only sets when actualPay
+  // is provided, since that's what marks a batch as finalized.
+  const canSave = actualPayValid || cashTipValid;
 
   const submit = () => {
     onSave({
       ...batch,
-      actualPay: parseFloat(actualPay),
+      actualPay: actualPayValid ? parseFloat(actualPay) : null,
       actualTip: actualTip ? parseFloat(actualTip) : null,
       actualMinutes: actualMinutes ? parseFloat(actualMinutes) : null,
-      reconciledAt: Date.now()
+      cashTip: cashTipValid ? parseFloat(cashTip) : null,
+      reconciledAt: actualPayValid ? Date.now() : (batch.reconciledAt ?? null)
     });
   };
 
@@ -1701,6 +1870,7 @@ function ReconcileForm({ batch, onSave, onCancel }) {
       actualPay: null,
       actualTip: null,
       actualMinutes: null,
+      cashTip: null,
       reconciledAt: null
     });
   };
@@ -1768,6 +1938,26 @@ function ReconcileForm({ batch, onSave, onCancel }) {
                 value={actualMinutes}
                 onChange={e => setActualMinutes(e.target.value)}
               />
+            </div>
+          </div>
+
+          <div>
+            <div className="uppercase-label mb-2">Cash tip</div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ position: 'absolute', left: 14, top: 14, color: 'var(--muted-soft)', fontSize: 16, fontWeight: 600 }}>$</span>
+              <input
+                className="input"
+                type="number"
+                inputMode="decimal"
+                step="0.01"
+                placeholder="—"
+                value={cashTip}
+                onChange={e => setCashTip(e.target.value)}
+                style={{ paddingLeft: 28 }}
+              />
+            </div>
+            <div className="mono mt-1" style={{ fontSize: 11, color: 'var(--muted)' }}>
+              Cash handed to you outside the app. Counts toward earnings, $/hr, and tax set-aside.
             </div>
           </div>
         </div>
@@ -2260,6 +2450,7 @@ function BulkImportForm({ onSave, onCancel }) {
       actualPay: fromSummary && total != null ? total : null,
       actualTip: null,
       actualMinutes: actualMins != null ? Math.round(actualMins) : null,
+      cashTip: num(c.cashtip),
       reconciledAt: hasActual ? Date.now() : null
     };
   };
@@ -2618,6 +2809,18 @@ function BulkImportForm({ onSave, onCancel }) {
                               />
                             </div>
                           )}
+                          <div className="col-span-2">
+                            <div className="uppercase-label mb-1">Cash tip</div>
+                            <input
+                              className="input"
+                              type="number"
+                              inputMode="decimal"
+                              step="0.01"
+                              placeholder="—"
+                              value={c.cashtip ?? ''}
+                              onChange={e => editField(c._idx, 'cashtip', e.target.value, true)}
+                            />
+                          </div>
                         </div>
                       </div>
                     )}
@@ -3472,7 +3675,7 @@ const TYPE_FILTERS = [
 // Expense components
 // ──────────────────────────────────────────────────────────
 
-function SettingsModal({ batches, expenses, user, taxPrefs, onTaxPrefsChange, onCancel, onImported, onSignOut, onClearData, onDeleteAccount }) {
+function SettingsModal({ batches, expenses, user, taxPrefs, onTaxPrefsChange, weekStartDay, onWeekStartDayChange, onCancel, onImported, onSignOut, onClearData, onDeleteAccount }) {
   const [busy, setBusy] = useState(null); // 'export' | 'import' | 'clear' | 'delete' | null
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
@@ -3599,6 +3802,24 @@ function SettingsModal({ batches, expenses, user, taxPrefs, onTaxPrefsChange, on
             </button>
           </div>
         )}
+        <div className="card p-4 mb-4">
+          <div className="uppercase-label mb-2">Display</div>
+          <div>
+            <div className="uppercase-label mb-1" style={{ fontSize: 11, color: 'var(--muted)' }}>Week starts on</div>
+            <select
+              className="input"
+              value={weekStartDay ?? 0}
+              onChange={e => onWeekStartDayChange?.(parseInt(e.target.value, 10))}
+            >
+              {WEEKDAY_LABELS_LONG.map((name, idx) => (
+                <option key={idx} value={idx}>{name}</option>
+              ))}
+            </select>
+            <div className="mono mt-1" style={{ fontSize: 11, color: 'var(--muted)' }}>
+              Affects the Week range on the dashboard and insights. Sunday matches Gridwise's default.
+            </div>
+          </div>
+        </div>
         <div className="card p-4 mb-4">
           <div className="flex items-center justify-between mb-2">
             <div className="uppercase-label" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -4197,25 +4418,33 @@ function ExpenseList({ expenses, onEdit, onDelete, onViewImage }) {
   );
 }
 
-function Insights({ batches, expenses }) {
+function Insights({ batches, expenses, weekStartDay = 0 }) {
   const [typeFilter, setTypeFilter] = useState('all');
   const [rangeFilter, setRangeFilter] = useState('all');
+  const [periodOffset, setPeriodOffset] = useState(0);
   const [showMoreBuckets, setShowMoreBuckets] = useState(false);
 
   const RANGES = [
-    { val: 'all',   label: 'All',   days: null },
-    { val: 'day',   label: 'Day',   days: 1 },
-    { val: 'week',  label: 'Week',  days: 7 },
-    { val: 'month', label: 'Month', days: 30 },
-    { val: 'year',  label: 'Year',  days: 365 }
+    { val: 'all',   label: 'All' },
+    { val: 'day',   label: 'Day' },
+    { val: 'week',  label: 'Week' },
+    { val: 'month', label: 'Month' },
+    { val: 'year',  label: 'Year' }
   ];
 
-  const rangeSince = useMemo(() => {
+  const pickRange = (val) => { setRangeFilter(val); setPeriodOffset(0); };
+
+  // 'all' has no calendar bounds — leave inRange as the whole list. Other
+  // chips share the dashboard's calendar-period helper.
+  const period = useMemo(() => {
     if (rangeFilter === 'all') return null;
-    if (rangeFilter === 'day') return new Date(new Date().setHours(0, 0, 0, 0)).getTime();
-    const days = (RANGES.find(r => r.val === rangeFilter) || {}).days || 0;
-    return Date.now() - days * 24 * 60 * 60 * 1000;
-  }, [rangeFilter]);
+    return rangeBounds(rangeFilter, periodOffset, weekStartDay);
+  }, [rangeFilter, periodOffset, weekStartDay]);
+
+  const inRange = (t) => {
+    if (!period) return true;
+    return t >= period.start && t <= period.end;
+  };
 
   const typeCounts = useMemo(() => {
     const counts = { shop_deliver: 0, shop_only: 0, delivery_only: 0, mixed: 0 };
@@ -4224,15 +4453,15 @@ function Insights({ batches, expenses }) {
   }, [batches]);
 
   const filtered = useMemo(() => {
-    let pool = rangeSince == null ? batches : batches.filter(b => batchTime(b) >= rangeSince);
+    let pool = batches.filter(b => inRange(batchTime(b)));
     if (typeFilter === 'all') return pool;
     return pool.filter(b => b.type === typeFilter);
-  }, [batches, typeFilter, rangeSince]);
+  }, [batches, typeFilter, period]);
 
   const filteredExpenses = useMemo(() => {
-    if (rangeSince == null) return expenses || [];
-    return (expenses || []).filter(e => expenseTime(e) >= rangeSince);
-  }, [expenses, rangeSince]);
+    if (!period) return expenses || [];
+    return (expenses || []).filter(e => inRange(expenseTime(e)));
+  }, [expenses, period]);
 
   const insights = useMemo(() => {
     if (filtered.length < 3) return null;
@@ -4270,7 +4499,7 @@ function Insights({ batches, expenses }) {
     ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(d => byDay[d] = { totalPay: 0, totalMin: 0, count: 0 });
     filtered.filter(b => b.accepted && bestMinutes(b) != null).forEach(b => {
       const day = dayName(batchTime(b));
-      byDay[day].totalPay += b.pay || 0;
+      byDay[day].totalPay += realPay(b);
       byDay[day].totalMin += bestMinutes(b);
       byDay[day].count++;
     });
@@ -4327,11 +4556,11 @@ function Insights({ batches, expenses }) {
   );
 
   const RangeChips = () => (
-    <div className="px-5 mb-4 flex gap-2 flex-wrap">
+    <div className="px-5 mb-2 flex gap-2 flex-wrap">
       {RANGES.map(r => (
         <button
           key={r.val}
-          onClick={() => setRangeFilter(r.val)}
+          onClick={() => pickRange(r.val)}
           className={`chip ${rangeFilter === r.val ? 'chip-active' : ''}`}
           style={{ padding: '6px 14px', fontSize: 13 }}
         >
@@ -4340,6 +4569,46 @@ function Insights({ batches, expenses }) {
       ))}
     </div>
   );
+
+  const PeriodNav = () => {
+    if (!period) return null;
+    return (
+      <div
+        className="px-5 mb-4 flex items-center justify-between"
+        style={{ minHeight: 28 }}
+      >
+        <button
+          type="button"
+          onClick={() => setPeriodOffset(o => o - 1)}
+          aria-label="Previous period"
+          style={{ background: 'none', border: 'none', padding: 6, color: 'var(--ink-soft)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
+        >
+          <ChevronLeft size={18} />
+        </button>
+        <div className="display" style={{ fontSize: 14, fontWeight: 600, textAlign: 'center', flex: 1 }}>
+          {period.label}
+          {periodOffset !== 0 && (
+            <button
+              type="button"
+              onClick={() => setPeriodOffset(0)}
+              style={{ background: 'none', border: 'none', padding: '0 0 0 8px', color: 'var(--accent)', fontSize: 11, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' }}
+            >
+              today
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => setPeriodOffset(o => o + 1)}
+          aria-label="Next period"
+          disabled={periodOffset >= 0}
+          style={{ background: 'none', border: 'none', padding: 6, color: periodOffset >= 0 ? 'var(--muted-soft)' : 'var(--ink-soft)', cursor: periodOffset >= 0 ? 'default' : 'pointer', display: 'inline-flex', alignItems: 'center' }}
+        >
+          <ChevronRight size={18} />
+        </button>
+      </div>
+    );
+  };
 
   const Header = () => (
     <div className="px-5 pt-8 pb-4">
@@ -4373,6 +4642,7 @@ function Insights({ batches, expenses }) {
         <Header />
         <FilterChips />
         <RangeChips />
+        <PeriodNav />
         <div className="px-5">
           <div className="card p-8 text-center">
             <TrendingUp size={28} style={{ color: 'var(--muted)', margin: '0 auto 12px' }} />
@@ -4393,6 +4663,7 @@ function Insights({ batches, expenses }) {
       <Header />
       <FilterChips />
       <RangeChips />
+      <PeriodNav />
 
       {typeFilter === 'all' && (
         <div className="px-5 mb-4">
@@ -4666,6 +4937,11 @@ export default function App() {
     try { localStorage.setItem(TAX_PREFS_KEY, JSON.stringify(taxPrefs)); }
     catch { /* ignore */ }
   }, [taxPrefs]);
+  const [weekStartDay, setWeekStartDay] = useState(loadWeekStartDay);
+  useEffect(() => {
+    try { localStorage.setItem(WEEK_START_KEY, String(weekStartDay)); }
+    catch { /* ignore */ }
+  }, [weekStartDay]);
 
   // On mount, if there's a saved token, validate it. If valid, we're in.
   // If not (revoked, expired, server reset), drop to AuthForm.
@@ -4926,7 +5202,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === 'home' && <Dashboard batches={batches} expenses={expenses} taxPrefs={taxPrefs} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} onPickDay={setViewingDayYmd} onOpenSettings={() => setShowSettings(true)} syncStatus={syncStatus} />}
+            {view === 'home' && <Dashboard batches={batches} expenses={expenses} taxPrefs={taxPrefs} weekStartDay={weekStartDay} onLog={() => setShowLog(true)} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} onPickDay={setViewingDayYmd} onOpenSettings={() => setShowSettings(true)} syncStatus={syncStatus} />}
             {view === 'list' && <BatchList batches={batches} onDelete={deleteBatch} onReconcile={setReconcilingBatch} onViewImages={setViewingImagesBatch} />}
             {view === 'expenses' && (
               <ExpenseList
@@ -4936,7 +5212,7 @@ export default function App() {
                 onViewImage={(images) => setViewerImages(images)}
               />
             )}
-            {view === 'insights' && <Insights batches={batches} expenses={expenses} />}
+            {view === 'insights' && <Insights batches={batches} expenses={expenses} weekStartDay={weekStartDay} />}
           </>
         )}
 
@@ -5015,6 +5291,8 @@ export default function App() {
             user={user}
             taxPrefs={taxPrefs}
             onTaxPrefsChange={setTaxPrefs}
+            weekStartDay={weekStartDay}
+            onWeekStartDayChange={setWeekStartDay}
             onCancel={() => setShowSettings(false)}
             onSignOut={async () => {
               await auth.logout();
