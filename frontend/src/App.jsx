@@ -835,6 +835,7 @@ const IRS_MILEAGE_RATE_YEAR = 2026;
 // the second. 0.725 → "0.725", 0.70 → "0.70", 0.67 → "0.67".
 const fmtMileageRate = (r) => r.toFixed(3).replace(/(\.\d\d)0+$/, '$1');
 const NET_MODE_KEY = 'batchwise:netMode';
+const TIME_MODE_KEY = 'batchwise:timeMode';
 
 // ── Tax set-aside ────────────────────────────────────────────────
 // Estimates how much to pull aside for end-of-year taxes on gig income.
@@ -1083,6 +1084,37 @@ function rangeBounds(rangeFilter, periodOffset, weekStartDay) {
   }
   // Fallback shouldn't happen, but degrade safely to today.
   return { ...dayBounds(now, 0), label: 'Today' };
+}
+
+// Online time = how long you were signed in to Instacart, approximated from
+// the earliest start-anchor to the latest end-anchor on each LOCAL day, then
+// summed across days. Per-day grouping prevents a multi-day span (e.g. Week)
+// from including overnight sleep. Single-batch days fall back to that batch's
+// active minutes — otherwise the span is 0 and we'd undercount.
+function computeOnlineMinutes(batches) {
+  if (!batches?.length) return 0;
+  const byDay = new Map();
+  for (const b of batches) {
+    const start = b.acceptedAt || b.screenshotTakenAt || b.loggedAt;
+    if (!start) continue;
+    const end = b.completedAt
+      || (b.acceptedAt && bestMinutes(b) ? b.acceptedAt + bestMinutes(b) * 60_000 : null)
+      || b.screenshotTakenAt
+      || b.loggedAt
+      || start;
+    const ymd = ymdLocal(start);
+    const entry = byDay.get(ymd) || { first: start, last: end, sumActive: 0 };
+    entry.first = Math.min(entry.first, start);
+    entry.last = Math.max(entry.last, end);
+    if (b.accepted) entry.sumActive += bestMinutes(b) || 0;
+    byDay.set(ymd, entry);
+  }
+  let total = 0;
+  for (const e of byDay.values()) {
+    const spanMin = (e.last - e.first) / 60_000;
+    total += Math.max(spanMin, e.sumActive);
+  }
+  return total;
 }
 
 function summarizeDay(batches, expenses, netMode = 'actual') {
@@ -1347,11 +1379,18 @@ function Dashboard({ batches, expenses, taxPrefs, weekStartDay = 0, onLog, onRec
     try { return localStorage.getItem(NET_MODE_KEY) || 'actual'; }
     catch { return 'actual'; }
   });
+  const [timeMode, setTimeMode] = useState(() => {
+    try { return localStorage.getItem(TIME_MODE_KEY) || 'active'; }
+    catch { return 'active'; }
+  });
   const [showNetHelp, setShowNetHelp] = useState(false);
   const [showTaxHelp, setShowTaxHelp] = useState(false);
   useEffect(() => {
     try { localStorage.setItem(NET_MODE_KEY, netMode); } catch { /* ignore */ }
   }, [netMode]);
+  useEffect(() => {
+    try { localStorage.setItem(TIME_MODE_KEY, timeMode); } catch { /* ignore */ }
+  }, [timeMode]);
   const RANGES = [
     { val: 'day',   label: 'Day' },
     { val: 'week',  label: 'Week' },
@@ -1376,6 +1415,9 @@ function Dashboard({ batches, expenses, taxPrefs, weekStartDay = 0, onLog, onRec
     const accepted = inRange.filter(b => b.accepted);
     const totalPay = accepted.reduce((s, b) => s + realPay(b), 0);
     const totalMin = accepted.reduce((s, b) => s + (bestMinutes(b) || 0), 0);
+    // Online time uses every batch in the period (accepted + declined) so
+    // declined-only screenshots still anchor the day's online window.
+    const totalOnlineMin = computeOnlineMinutes(inRange);
     const totalMiles = accepted.reduce((s, b) => s + (b.miles || 0), 0);
     const inRangeExpenses = (expenses || []).filter(e => {
       const t = expenseTime(e);
@@ -1414,6 +1456,8 @@ function Dashboard({ batches, expenses, taxPrefs, weekStartDay = 0, onLog, onRec
       net,
       periodIrsNet,
       totalMiles,
+      totalMin,
+      totalOnlineMin,
       count: accepted.length,
       offered: inRange.length
     };
@@ -1588,6 +1632,10 @@ function Dashboard({ batches, expenses, taxPrefs, weekStartDay = 0, onLog, onRec
                   <div style={{ fontSize: 11, opacity: 0.8 }}>
                     The IRS rate is meant to cover depreciation, fuel, repairs, insurance, and registration — pick whichever method gives you the bigger deduction at tax time.
                   </div>
+                  <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.1)', fontSize: 11, opacity: 0.85 }}>
+                    <span style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 600 }}>Active vs Online: </span>
+                    Active = time on orders. Online = time signed into Instacart, approximated from your first to last screenshot/event each day. Tap the pill to switch.
+                  </div>
                 </div>
               )}
             </div>
@@ -1662,14 +1710,22 @@ function Dashboard({ batches, expenses, taxPrefs, weekStartDay = 0, onLog, onRec
                 {stats.totalMiles ? stats.totalMiles.toFixed(1) : '—'}
               </div>
             </div>
-            <div>
+            <button
+              type="button"
+              onClick={() => setTimeMode(m => m === 'active' ? 'online' : 'active')}
+              aria-label="Toggle between active and online time"
+              style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit', color: 'inherit' }}
+            >
               <div style={{ color: 'var(--muted-soft)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                Accept
+                {timeMode === 'active' ? 'Active' : 'Online'}
               </div>
               <div className="mono" style={{ fontSize: 18, fontWeight: 500, marginTop: 2 }}>
-                {stats.acceptRate != null ? `${stats.acceptRate.toFixed(0)}%` : '—'}
+                {(() => {
+                  const mins = timeMode === 'active' ? stats.totalMin : stats.totalOnlineMin;
+                  return mins ? `${(mins / 60).toFixed(1)}h` : '—';
+                })()}
               </div>
-            </div>
+            </button>
           </div>
         </div>
 
